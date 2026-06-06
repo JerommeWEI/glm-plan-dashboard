@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.2
+# GLM Plan Dashboard v1.3
 
 GLM 套餐用量悬浮小组件，在 Windows 桌面右下角置顶显示 Token 剩余量。
 
@@ -14,7 +14,7 @@ GLM 套餐用量悬浮小组件，在 Windows 桌面右下角置顶显示 Token 
 ## 实施方案
 
 - **语言**: Python 3
-- **GUI**: tkinter（无边框置顶窗口 + transparentcolor 实现透明）
+- **GUI**: tkinter（无边框置顶窗口 + Win32 分层窗口实现逐像素透明）
 - **图像**: Pillow（PIL）绘制电池图标，支持圆角和抗锯齿
 - **API**: 通过 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 环境变量或 `~/.claude/settings.json` 读取配置，调用 GLM 配额接口获取用量
 - **刷新**: 后台线程请求 API，主线程更新 UI，5 分钟轮询
@@ -29,6 +29,12 @@ python main.py
 或直接双击 `start.bat`（无控制台窗口启动）。
 
 ## 更新日志
+
+### v1.3
+- 使用 Win32 分层窗口（`UpdateLayeredWindow`）替代 `transparentcolor` 方案，实现真正的逐像素 Alpha 透明
+- 圆角背景现在具有平滑的抗锯齿边缘，不再有毛边或倒角
+- 背景卡片圆角半径增大（radius=30），外观更圆润
+- 调整整体透明度为 92% 不透明度，背景更扎实
 
 ### v1.2
 - 百分比文字嵌入电池图标内部，取代原有的右侧文字布局
