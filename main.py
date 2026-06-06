@@ -71,35 +71,22 @@ def _remaining_color(remaining):
 
 
 def create_widget_image(remaining):
-    """生成悬浮窗口用的电池图像（圆角 + 20% 透明度）"""
-    cw, ch = 240, 60
+    """生成悬浮窗口用的电池图像（百分比文字嵌入电池内部）"""
+    cw, ch = 192, 78
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     color = _remaining_color(remaining)
 
-    # 圆角深色背景卡片（radius=18 更圆润）
+    # 圆角深色背景卡片
     d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=18, fill=(40, 40, 40, 255))
 
     # 电池主体尺寸
-    body_w, body_h = 112, 35
-    cap_w, cap_h = 8, 16
-    text_gap = 10
+    body_w, body_h = 140, 40
+    cap_w, cap_h = 8, 18
 
-    # 测量文字宽度以计算总内容宽度
-    try:
-        font = ImageFont.truetype("arial.ttf", 34)
-    except Exception:
-        font = ImageFont.load_default()
-    label = f"{int(remaining)}%"
-    bbox = d.textbbox((0, 0), label, font=font)
-    text_w = bbox[2] - bbox[0]
-
-    # 内容总宽 = 电池 + 正极 + 间距 + 文字，居中摆放
-    content_w = body_w + cap_w + text_gap + text_w
-    offset_x = (cw - content_w) // 2
-
-    # 电池位置（居中后）
-    bx1 = offset_x
+    # 电池居中（包含正极凸起的宽度）
+    total_w = body_w + cap_w
+    bx1 = (cw - total_w) // 2
     by1 = (ch - body_h) // 2
     bx2 = bx1 + body_w
     by2 = by1 + body_h
@@ -129,11 +116,18 @@ def create_widget_image(remaining):
     else:
         d.rectangle([ix1, iy1, ix1 + 2, iy2], fill=(*color, 255))
 
-    # 百分比文字
+    # 百分比文字（居中在电池内部）
+    try:
+        font = ImageFont.truetype("arialbd.ttf", 28)
+    except Exception:
+        font = ImageFont.load_default()
+    label = f"{int(remaining)}%"
+    bbox = d.textbbox((0, 0), label, font=font)
+    text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
-    tx = bx2 + cap_w + text_gap
-    ty = (ch - text_h) // 2 - bbox[1]
-    d.text((tx, ty), label, fill=(240, 240, 240, 255), font=font)
+    tx = (bx1 + bx2 - text_w) // 2 - bbox[0]
+    ty = (by1 + by2 - text_h) // 2 - bbox[1]
+    d.text((tx, ty), label, fill=(255, 255, 255, 255), font=font)
 
     # 合成到黑色背景（消除边缘杂色）
     black_bg = Image.new("RGBA", (cw, ch), (0, 0, 0, 255))
@@ -146,8 +140,8 @@ def create_widget_image(remaining):
     # 转为 RGB（tkinter 用 transparentcolor 处理透明）
     img = img.convert("RGB")
 
-    # 缩小 35%
-    img = img.resize((int(cw * 0.35), int(ch * 0.35)), Image.LANCZOS)
+    # 缩小 42%（比原始放大 20%）
+    img = img.resize((int(cw * 0.42), int(ch * 0.42)), Image.LANCZOS)
 
     # 确保角落像素纯黑（transparentcolor 需要精确匹配）
     pixels = img.load()
@@ -169,7 +163,7 @@ class GLMWidget:
         self.root.wm_attributes("-transparentcolor", "black")
 
         # 窗口尺寸 & 初始位置（右下角）
-        self._win_w, self._win_h = 84, 21
+        self._win_w, self._win_h = 81, 33
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         x = sw - self._win_w - 15
