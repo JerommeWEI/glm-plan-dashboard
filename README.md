@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.0
+# GLM Plan Dashboard v1.1
 
 GLM 套餐用量悬浮小组件，在 Windows 桌面右下角置顶显示 Token 剩余量。
 
@@ -26,4 +26,12 @@ pip install -r requirements.txt
 python main.py
 ```
 
-或直接双击 `start.bat`。
+或直接双击 `start.bat`（无控制台窗口启动）。
+
+## 更新日志
+
+### v1.1
+- 使用 `pythonw` 替代 `python` 启动脚本，隐藏 CMD 黑窗口
+
+### v1.0
+- 初始版本：GLM 套餐用量悬浮小组件
