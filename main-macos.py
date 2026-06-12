@@ -73,16 +73,17 @@ def _remaining_color(remaining):
 
 
 def create_menu_bar_icon(remaining):
-    """生成菜单栏用的电池图标（小尺寸，约 40×20 像素）"""
-    # macOS 菜单栏图标通常很小
-    width, height = 48, 24
+    """生成菜单栏用的电池图标（优化比例，带百分比文字）"""
+    # 增大尺寸以容纳文字（更长更扁，类似 macOS 原生电池）
+    # 使用 28×7 尺寸，保持 4:1 比例
+    width, height = 28, 7
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     color = _remaining_color(remaining)
 
-    # 电池主体尺寸
-    body_w, body_h = 36, 14
-    cap_w, cap_h = 4, 8
+    # 电池主体尺寸 - macOS 风格比例（更长更扁）
+    body_w, body_h = 23, 5
+    cap_w, cap_h = 2, 3
 
     # 电池居中（包含正极凸起的宽度）
     total_w = body_w + cap_w
@@ -91,42 +92,28 @@ def create_menu_bar_icon(remaining):
     bx2 = bx1 + body_w
     by2 = by1 + body_h
 
-    # 正极凸起
+    # 正极凸起（与电池主体垂直居中对齐）
+    battery_center_y = by1 + body_h // 2
     d.rounded_rectangle(
-        [bx2, height // 2 - cap_h // 2, bx2 + cap_w, height // 2 + cap_h // 2],
+        [bx2, battery_center_y - cap_h // 2, bx2 + cap_w, battery_center_y + cap_h // 2],
         radius=1, fill=(180, 180, 180, 255),
     )
     # 外壳
     d.rounded_rectangle(
-        [bx1, by1, bx2, by2], radius=2,
-        outline=(220, 220, 220, 255), width=1,
+        [bx1, by1, bx2, by2], radius=1,
+        outline=(220, 220, 220, 120), width=1,
     )
 
-    # 填充条
-    inner = 2
+    # 填充条（紧贴边缘，无间隙）
+    inner = 0
     ix1, iy1 = bx1 + inner, by1 + inner
     ix2, iy2 = bx2 - inner, by2 - inner
-    fill_w = (ix2 - ix1) * min(remaining, 100) / 100
+    fill_w = max(1, int((ix2 - ix1) * min(remaining, 100) / 100))
 
-    if fill_w > 0.5:
-        d.rounded_rectangle(
-            [ix1, iy1, ix1 + fill_w, iy2],
-            radius=1, fill=(*color, 255),
-        )
-    else:
-        d.rectangle([ix1, iy1, ix1 + 1, iy2], fill=(*color, 255))
-
-    # 百分比文字（很小的字体，可选）
-    try:
-        font = ImageFont.truetype("Arial Bold", 10)
-    except Exception:
-        font = ImageFont.load_default()
-    label = f"{int(remaining)}"
-    bbox = d.textbbox((0, 0), label, font=font)
-    text_w = bbox[2] - bbox[0]
-    tx = (bx1 + bx2 - text_w) // 2 - bbox[0]
-    ty = (by1 + by2) // 2 - bbox[1] - 1
-    d.text((tx, ty), label, fill=(255, 255, 255, 255), font=font)
+    d.rounded_rectangle(
+        [ix1, iy1, ix1 + fill_w, iy2],
+        radius=1, fill=(*color, 255),
+    )
 
     # 保存为临时文件
     icon_path = Path.home() / ".claude" / "glm-battery-icon.png"
@@ -137,8 +124,7 @@ def create_menu_bar_icon(remaining):
 # ── 菜单栏应用 ─────────────────────────────────────────────────────────
 class GLMMenuBarApp(rumps.App):
     def __init__(self):
-        super().__init__("⚡", quit_button=None)
-        self.icon = None
+        super().__init__("", quit_button=None, icon=None, template=False)
         self.usage_pct = 0
         self.refresh_item = rumps.MenuItem("刷新", callback=self.manual_refresh)
         self.menu = [
@@ -160,16 +146,13 @@ class GLMMenuBarApp(rumps.App):
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _update_ui(self, usage_pct):
-        """更新菜单栏图标和标题"""
+        """更新菜单栏标题"""
         self.usage_pct = usage_pct
         remaining = max(0, 100 - usage_pct)
 
-        # 更新标题
-        self.title = f"{int(remaining)}%"
-
-        # 更新图标
-        icon_path = create_menu_bar_icon(remaining)
-        self.icon = rumps.Image(icon_path)
+        # 显示 Token 剩余百分比
+        self.title = f"Token: {remaining:.0f}%"
+        self.icon = None
 
         # 更新菜单项提示
         self.refresh_item.title = f"刷新 (剩余: {remaining:.1f}%)"
