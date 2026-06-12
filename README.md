@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.3
+# GLM Plan Dashboard v1.4
 
 GLM 套餐用量悬浮小组件，在 Windows 桌面右下角置顶显示 Token 剩余量。
 
@@ -10,6 +10,7 @@ GLM 套餐用量悬浮小组件，在 Windows 桌面右下角置顶显示 Token 
 - 右键菜单：立即刷新 / 退出
 - 可拖拽移动位置
 - 圆角半透明悬浮窗口
+- 支持开机自启动（Windows 任务计划程序，登录后启动）
 
 ## 实施方案
 
@@ -29,6 +30,10 @@ python main.py
 或直接双击 `start.bat`（无控制台窗口启动）。
 
 ## 更新日志
+
+### v1.4
+- 电池图标尺寸调整：长度（水平）加长 50%、宽度（垂直）加宽 10%，百分比文字保持居中
+- 新增开机自启动支持：修复 `pythonw` 在无控制台环境（任务计划程序 / 开机自启）下 `sys.stdout` 为 `None` 导致 `print` 崩溃的问题，输出重定向至 `os.devnull`
 
 ### v1.3
 - 使用 Win32 分层窗口（`UpdateLayeredWindow`）替代 `transparentcolor` 方案，实现真正的逐像素 Alpha 透明

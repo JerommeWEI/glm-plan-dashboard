@@ -3,6 +3,7 @@
 import ctypes
 import json
 import os
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -10,6 +11,13 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from PIL import Image, ImageDraw, ImageFont
+
+# pythonw 在无控制台环境（任务计划程序 / 开机自启）下 sys.stdout/stderr 为 None，
+# 此时 print() 会抛 AttributeError 导致进程崩溃，重定向到 devnull 规避。
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
 
 REFRESH_INTERVAL = 300  # 5 分钟
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -113,7 +121,7 @@ def _remaining_color(remaining):
 
 def create_widget_image(remaining):
     """生成悬浮窗口用的电池图像（RGBA，真正的逐像素透明圆角）"""
-    cw, ch = 192, 78
+    cw, ch = 288, 86
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     color = _remaining_color(remaining)
@@ -122,7 +130,7 @@ def create_widget_image(remaining):
     d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=30, fill=(40, 40, 40, 255))
 
     # 电池主体尺寸
-    body_w, body_h = 140, 40
+    body_w, body_h = 210, 44
     cap_w, cap_h = 8, 18
 
     # 电池居中（包含正极凸起的宽度）
@@ -252,7 +260,7 @@ class GLMWidget:
         self.root.attributes("-topmost", True)  # 置顶
 
         # 窗口尺寸 & 初始位置（右下角）
-        self._win_w, self._win_h = 81, 33
+        self._win_w, self._win_h = 121, 37
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         x = sw - self._win_w - 15
