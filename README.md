@@ -22,12 +22,29 @@ GLM 套餐用量悬浮小组件，在 Windows 桌面右下角置顶显示 Token 
 
 ## 安装与运行
 
+### Windows
+
 ```bash
 pip install -r requirements.txt
 python main.py
 ```
 
 或直接双击 `start.bat`（无控制台窗口启动）。
+
+### macOS
+
+```bash
+pip3 install -r requirements-macos.txt
+python3 main-macos.py
+```
+
+或直接双击 `start-macos.command`。
+
+**macOS 版本特性：**
+- 在顶部菜单栏显示电池图标
+- 点击图标显示菜单（刷新/退出）
+- 每 5 分钟自动刷新数据
+- 颜色随余量变化：绿色（>40%）→ 黄色（20%-40%）→ 红色（<20%）
 
 ## 更新日志
 
