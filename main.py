@@ -1,4 +1,8 @@
-"""GLM 套餐用量悬浮小组件 — 右下角置顶显示 Token 剩余量（Win32 分层窗口）"""
+"""GLM 套餐用量悬浮小组件 + 番茄工作闹钟 — 右下角置顶悬浮（Win32 分层窗口）
+
+上行：电池图标显示 Token 剩余百分比
+下行：番茄钟倒计时（45 分钟工作 ↔ 5 分钟休息，自动循环）
+"""
 
 import ctypes
 import json
@@ -6,11 +10,13 @@ import os
 import sys
 import threading
 import tkinter as tk
+import winreg
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from PIL import Image, ImageDraw, ImageFont
+from winotify import Notification
 
 # pythonw 在无控制台环境（任务计划程序 / 开机自启）下 sys.stdout/stderr 为 None，
 # 此时 print() 会抛 AttributeError 导致进程崩溃，重定向到 devnull 规避。
@@ -19,8 +25,15 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")
 
-REFRESH_INTERVAL = 300  # 5 分钟
+REFRESH_INTERVAL = 300  # Token 刷新：5 分钟
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+ICON_PATH = Path(__file__).resolve().parent / "tomato.ico"  # AUMID 应用图标
+ICON_PNG = Path(__file__).resolve().parent / "tomato.png"   # toast 内联图标
+AUMID = "GlmDashboard"  # 应用模型 ID（系统通知来源标识）
+
+# 番茄钟配置：45 分钟工作 ↔ 5 分钟休息，自动循环
+POMODORO_WORK_MIN = 45
+POMODORO_REST_MIN = 5
 
 # ── Win32 常量与结构体 ────────────────────────────────────────────────
 WS_EX_LAYERED = 0x80000
@@ -109,6 +122,32 @@ def fetch_usage():
     return None
 
 
+# ── 通知 ──────────────────────────────────────────────────────────────
+def register_aumid():
+    """注册应用 AUMID 到注册表，让系统通知显示番茄图标和应用名「GLM 仪表盘」（幂等）"""
+    key_path = f"Software\\Classes\\AppUserModelId\\{AUMID}"
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "GLM 仪表盘")
+            winreg.SetValueEx(key, "IconUri", 0, winreg.REG_SZ, str(ICON_PATH))
+    except OSError as exc:
+        print(f"AUMID 注册失败: {exc}")
+
+
+def notify_windows(title, message):
+    """通过 winotify 弹出 WinRT toast（番茄图标 + 应用名「GLM 仪表盘」）"""
+    try:
+        Notification(
+            app_id=AUMID,
+            title=title,
+            msg=message,
+            icon=str(ICON_PNG),
+            duration="short",
+        ).show()
+    except Exception as exc:
+        print(f"通知发送失败: {exc}")
+
+
 # ── 图标生成 ──────────────────────────────────────────────────────────
 def _remaining_color(remaining):
     """根据剩余百分比返回颜色：>40% 绿，20-40% 黄，<20% 红"""
@@ -119,30 +158,28 @@ def _remaining_color(remaining):
     return (244, 67, 54)
 
 
-def create_widget_image(remaining):
-    """生成悬浮窗口用的电池图像（RGBA，真正的逐像素透明圆角）"""
-    cw, ch = 288, 86
-    img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+def _pomo_label(stage, remaining_sec):
+    """番茄钟显示文字，如 '工作 42:30'"""
+    stage_zh = "工作" if stage == "work" else "休息"
+    m, s = divmod(max(0, remaining_sec), 60)
+    return f"{stage_zh} {m:02d}:{s:02d}"
+
+
+def _draw_battery(d, cw, half_h, remaining):
+    """在高度 half_h 的区域内垂直居中绘制电池图标 + 百分比"""
     color = _remaining_color(remaining)
-
-    # 圆角深色背景卡片
-    d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=30, fill=(40, 40, 40, 255))
-
-    # 电池主体尺寸
     body_w, body_h = 210, 44
     cap_w, cap_h = 8, 18
 
-    # 电池居中（包含正极凸起的宽度）
     total_w = body_w + cap_w
     bx1 = (cw - total_w) // 2
-    by1 = (ch - body_h) // 2
+    by1 = (half_h - body_h) // 2
     bx2 = bx1 + body_w
     by2 = by1 + body_h
 
     # 正极凸起
     d.rounded_rectangle(
-        [bx2, ch // 2 - cap_h // 2, bx2 + cap_w, ch // 2 + cap_h // 2],
+        [bx2, half_h // 2 - cap_h // 2, bx2 + cap_w, half_h // 2 + cap_h // 2],
         radius=2, fill=(180, 180, 180, 255),
     )
     # 外壳
@@ -178,7 +215,48 @@ def create_widget_image(remaining):
     ty = (by1 + by2 - text_h) // 2 - bbox[1]
     d.text((tx, ty), label, fill=(255, 255, 255, 255), font=font)
 
-    # 应用 80% 不透明度（整体半透明玻璃效果）
+
+def create_widget_image(token_remaining, pomo_stage, pomo_remaining_sec, dim):
+    """生成悬浮窗图像：上行电池+Token%，下行番茄钟倒计时（RGBA 逐像素透明圆角）"""
+    cw, ch = 288, 172
+    img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+
+    # 圆角深色背景卡片（整体）
+    d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=30, fill=(40, 40, 40, 255))
+
+    # 中间细分隔线
+    d.line([24, ch // 2, cw - 24, ch // 2], fill=(70, 70, 70, 255), width=1)
+
+    half_h = ch // 2
+
+    # 上半：电池图标 + Token%
+    _draw_battery(d, cw, half_h, token_remaining)
+
+    # 下半：番茄钟倒计时（需支持中文，依次尝试微软雅黑/黑体/宋体）
+    font = None
+    for _fname in ("msyhbd.ttc", "msyh.ttc", "simhei.ttf", "simsun.ttc"):
+        try:
+            font = ImageFont.truetype(_fname, 34)
+            break
+        except Exception:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+
+    label = _pomo_label(pomo_stage, pomo_remaining_sec)
+    bbox = d.textbbox((0, 0), label, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    tx = (cw - text_w) // 2 - bbox[0]
+    ty = half_h + (half_h - text_h) // 2 - bbox[1]
+
+    # 文字颜色：休息=绿、工作=白；闪烁(dim)时切到背景灰，造成闪烁
+    bright = (120, 220, 140) if pomo_stage == "rest" else (255, 255, 255)
+    text_color = (60, 60, 60) if dim else bright
+    d.text((tx, ty), label, fill=(*text_color, 255), font=font)
+
+    # 应用 92% 不透明度（整体半透明玻璃效果）
     alpha = img.getchannel("A")
     alpha = alpha.point(lambda a: int(a * 0.92))
     img.putalpha(alpha)
@@ -259,8 +337,8 @@ class GLMWidget:
         self.root.overrideredirect(True)       # 无边框
         self.root.attributes("-topmost", True)  # 置顶
 
-        # 窗口尺寸 & 初始位置（右下角）
-        self._win_w, self._win_h = 121, 37
+        # 窗口尺寸 & 初始位置（右下角）—— 高度加大以容纳上下两行
+        self._win_w, self._win_h = 121, 73
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         x = sw - self._win_w - 15
@@ -284,8 +362,14 @@ class GLMWidget:
         self.root.bind("<B1-Motion>", self._drag_move)
         self._drag_x = self._drag_y = 0
 
-        # 显示加载状态
-        self._update_image(0)
+        # 状态：Token 剩余 + 番茄钟
+        self._token_remaining = 100  # 加载态显示满电，API 返回后更新
+        self._pomo_stage = "work"
+        self._pomo_remaining = POMODORO_WORK_MIN * 60
+        self._dim = False  # 番茄钟闪烁（灭）标志
+
+        # 显示初始状态
+        self._render()
 
     # Win32 分层窗口 -----------------------------------------------
     def _setup_layered(self):
@@ -302,19 +386,59 @@ class GLMWidget:
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
 
-    # UI 更新 -------------------------------------------------------
-    def _update_image(self, usage_pct):
-        remaining = max(0, 100 - usage_pct)
-        img = create_widget_image(remaining)
+    # 统一渲染（Token + 番茄钟）------------------------------------
+    def _render(self):
+        img = create_widget_image(
+            self._token_remaining, self._pomo_stage, self._pomo_remaining, self._dim
+        )
         _update_layered_window(self._hwnd, img)
-        self.root.tooltip_text = f"GLM Token 剩余: {remaining:.1f}%（已用 {usage_pct:.1f}%）"
+        stage_zh = "工作" if self._pomo_stage == "work" else "休息"
+        m, s = divmod(max(0, self._pomo_remaining), 60)
+        self.root.tooltip_text = (
+            f"GLM Token 剩余: {self._token_remaining:.0f}% | 番茄钟 {stage_zh} {m:02d}:{s:02d}"
+        )
 
-    # 数据刷新 -------------------------------------------------------
+    # 番茄钟 -------------------------------------------------------
+    def _pomo_tick(self):
+        """每秒推进倒计时，归零时切换阶段并通知/闪烁"""
+        self._pomo_remaining -= 1
+        if self._pomo_remaining < 0:
+            self._switch_stage()
+        self._render()
+        self.root.after(1000, self._pomo_tick)
+
+    def _switch_stage(self):
+        if self._pomo_stage == "work":
+            notify_windows("休息时间到", "45 分钟工作完成，休息 5 分钟～放松一下！")
+            self._pomo_stage = "rest"
+            self._pomo_remaining = POMODORO_REST_MIN * 60
+        else:
+            notify_windows("工作时间到", "休息结束，开始下一个 45 分钟工作周期！")
+            self._pomo_stage = "work"
+            self._pomo_remaining = POMODORO_WORK_MIN * 60
+        self._start_blink()
+
+    def _start_blink(self):
+        self._blink_left = 12  # 12 × 0.5s = 6 秒闪烁
+        self._blink_step()
+
+    def _blink_step(self):
+        if self._blink_left <= 0:
+            self._dim = False
+            self._render()
+            return
+        self._dim = not self._dim
+        self._blink_left -= 1
+        self._render()
+        self.root.after(500, self._blink_step)
+
+    # Token 数据刷新 -------------------------------------------------------
     def _do_refresh(self):
         def _fetch():
             result = fetch_usage()
             pct = result["percentage"] if result else 0
-            self.root.after(0, lambda: self._update_image(pct))
+            self._token_remaining = max(0, 100 - pct)
+            self.root.after(0, self._render)
 
         threading.Thread(target=_fetch, daemon=True).start()
         self._schedule()
@@ -329,7 +453,9 @@ class GLMWidget:
 
     # 启动 -----------------------------------------------------------
     def run(self):
-        self.root.after(500, self._do_refresh)
+        register_aumid()                          # 注册通知应用 ID
+        self.root.after(500, self._do_refresh)    # Token 刷新
+        self.root.after(1000, self._pomo_tick)    # 番茄钟启动
         self.root.mainloop()
 
 
