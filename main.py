@@ -149,6 +149,25 @@ def notify_windows(title, message):
 
 
 # ── 图标生成 ──────────────────────────────────────────────────────────
+# 字体缓存：同一字号只加载一次，避免每秒重复 truetype 造成 GDI 字体对象阶梯增长
+_FONT_CACHE = {}
+
+
+def _load_font(candidates, size):
+    """按 (字体候选, 字号) 缓存 PIL 字体对象"""
+    key = (candidates, size)
+    if key not in _FONT_CACHE:
+        font = None
+        for _fname in candidates:
+            try:
+                font = ImageFont.truetype(_fname, size)
+                break
+            except Exception:
+                continue
+        _FONT_CACHE[key] = font or ImageFont.load_default()
+    return _FONT_CACHE[key]
+
+
 def _remaining_color(remaining):
     """根据剩余百分比返回颜色：>40% 绿，20-40% 黄，<20% 红"""
     if remaining > 40:
@@ -203,10 +222,7 @@ def _draw_battery(d, cw, half_h, remaining):
         d.rectangle([ix1, iy1, ix1 + 2, iy2], fill=(*color, 255))
 
     # 百分比文字（居中在电池内部）
-    try:
-        font = ImageFont.truetype("arialbd.ttf", 28)
-    except Exception:
-        font = ImageFont.load_default()
+    font = _load_font(("arialbd.ttf",), 28)
     label = f"{int(remaining)}%"
     bbox = d.textbbox((0, 0), label, font=font)
     text_w = bbox[2] - bbox[0]
@@ -234,15 +250,7 @@ def create_widget_image(token_remaining, pomo_stage, pomo_remaining_sec, dim):
     _draw_battery(d, cw, half_h, token_remaining)
 
     # 下半：番茄钟倒计时（需支持中文，依次尝试微软雅黑/黑体/宋体）
-    font = None
-    for _fname in ("msyhbd.ttc", "msyh.ttc", "simhei.ttf", "simsun.ttc"):
-        try:
-            font = ImageFont.truetype(_fname, 34)
-            break
-        except Exception:
-            continue
-    if font is None:
-        font = ImageFont.load_default()
+    font = _load_font(("msyhbd.ttc", "msyh.ttc", "simhei.ttf", "simsun.ttc"), 34)
 
     label = _pomo_label(pomo_stage, pomo_remaining_sec)
     bbox = d.textbbox((0, 0), label, font=font)
@@ -337,12 +345,11 @@ class GLMWidget:
         self.root.overrideredirect(True)       # 无边框
         self.root.attributes("-topmost", True)  # 置顶
 
-        # 窗口尺寸 & 初始位置（右下角）—— 高度加大以容纳上下两行
+        # 窗口尺寸 & 默认位置（屏幕1 顶部水平居中）
         self._win_w, self._win_h = 121, 73
         sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
-        x = sw - self._win_w - 15
-        y = sh - self._win_h - 55
+        x = (sw - self._win_w) // 2
+        y = 10  # 顶部边距
         self.root.geometry(f"{self._win_w}x{self._win_h}+{x}+{y}")
 
         # 确保窗口已创建，再设置分层窗口
@@ -459,5 +466,19 @@ class GLMWidget:
         self.root.mainloop()
 
 
+def _ensure_single_instance():
+    """命名互斥锁保证全局只运行一个实例；已有实例时静默退出。"""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_mutex = kernel32.CreateMutexW
+    create_mutex.restype = ctypes.c_void_p
+    create_mutex.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    mutex = create_mutex(None, False, "Global\\GlmDashboard_SingleInstance")
+    # CreateMutex 返回 0 为失败；名称已存在时 last error == ERROR_ALREADY_EXISTS(183)
+    if not mutex or ctypes.get_last_error() == 183:
+        sys.exit(0)
+    return mutex
+
+
 if __name__ == "__main__":
+    _single_mutex = _ensure_single_instance()  # 持有引用，进程退出前互斥锁不释放
     GLMWidget().run()
