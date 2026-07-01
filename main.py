@@ -1,7 +1,7 @@
 """GLM 套餐用量悬浮小组件 + 番茄工作闹钟 — 右下角置顶悬浮（Win32 分层窗口）
 
 上行：电池图标显示 Token 剩余百分比
-下行：番茄钟倒计时（45 分钟工作 ↔ 5 分钟休息，自动循环）
+下行：番茄钟倒计时（50 分钟工作 ↔ 10 分钟休息，自动循环）
 """
 
 import ctypes
@@ -31,9 +31,9 @@ ICON_PATH = Path(__file__).resolve().parent / "tomato.ico"  # AUMID 应用图标
 ICON_PNG = Path(__file__).resolve().parent / "tomato.png"   # toast 内联图标
 AUMID = "GlmDashboard"  # 应用模型 ID（系统通知来源标识）
 
-# 番茄钟配置：45 分钟工作 ↔ 5 分钟休息，自动循环
-POMODORO_WORK_MIN = 45
-POMODORO_REST_MIN = 5
+# 番茄钟配置：50 分钟工作 ↔ 10 分钟休息（每周期 1 小时），自动循环
+POMODORO_WORK_MIN = 50
+POMODORO_REST_MIN = 10
 
 # ── Win32 常量与结构体 ────────────────────────────────────────────────
 WS_EX_LAYERED = 0x80000
@@ -416,11 +416,11 @@ class GLMWidget:
 
     def _switch_stage(self):
         if self._pomo_stage == "work":
-            notify_windows("休息时间到", "45 分钟工作完成，休息 5 分钟～放松一下！")
+            notify_windows("休息时间到", "50 分钟工作完成，休息 10 分钟～放松一下！")
             self._pomo_stage = "rest"
             self._pomo_remaining = POMODORO_REST_MIN * 60
         else:
-            notify_windows("工作时间到", "休息结束，开始下一个 45 分钟工作周期！")
+            notify_windows("工作时间到", "休息结束，开始下一个 50 分钟工作周期！")
             self._pomo_stage = "work"
             self._pomo_remaining = POMODORO_WORK_MIN * 60
         self._start_blink()
