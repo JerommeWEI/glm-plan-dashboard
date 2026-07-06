@@ -27,9 +27,14 @@ if sys.stderr is None:
 
 REFRESH_INTERVAL = 300  # Token 刷新：5 分钟
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+CONFIG_PATH = Path(__file__).resolve().parent / "config.json"  # 项目本地独立配置（脱离 cc）
 ICON_PATH = Path(__file__).resolve().parent / "tomato.ico"  # AUMID 应用图标
 ICON_PNG = Path(__file__).resolve().parent / "tomato.png"   # toast 内联图标
 AUMID = "GlmDashboard"  # 应用模型 ID（系统通知来源标识）
+
+# 开机自启：写入 HKCU Run 项，登录后用 pythonw 无窗口启动本脚本
+AUTOSTART_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_NAME = "GlmDashboard"
 
 # 番茄钟配置：50 分钟工作 ↔ 10 分钟休息（每周期 1 小时），自动循环
 POMODORO_WORK_MIN = 50
@@ -77,20 +82,42 @@ class _BMPINFOHEADER(ctypes.Structure):
 
 
 # ── 配置 ──────────────────────────────────────────────────────────────
-def load_config():
-    """从环境变量或 ~/.claude/settings.json 读取 API 配置"""
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-    token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+def read_raw_config():
+    """读取原始 API 配置（未裁剪 base_url），优先级：
+    项目 config.json > 环境变量 > ~/.claude/settings.json（兜底，兼容 cc）"""
+    base_url = ""
+    token = ""
 
+    # 1. 项目本地 config.json（独立运行首选）
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
+                cfg = json.load(f)
+            base_url = cfg.get("base_url", "")
+            token = cfg.get("token", "")
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"config.json 读取失败: {exc}")
+
+    # 2. 环境变量
+    if not base_url or not token:
+        base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL", "")
+        token = token or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+
+    # 3. ~/.claude/settings.json（兜底）
     if (not base_url or not token) and SETTINGS_PATH.exists():
         with open(SETTINGS_PATH, encoding="utf-8") as f:
             env = json.load(f).get("env", {})
         base_url = base_url or env.get("ANTHROPIC_BASE_URL", "")
         token = token or env.get("ANTHROPIC_AUTH_TOKEN", "")
 
+    return base_url, token
+
+
+def load_config():
+    """读取 API 配置并裁剪 base_url 为 base_domain，返回 (base_domain, token) 或 (None, None)"""
+    base_url, token = read_raw_config()
     if not base_url or not token:
         return None, None
-
     base_domain = base_url.split("/api/anthropic")[0] if "/api/anthropic" in base_url else base_url
     return base_domain, token
 
@@ -146,6 +173,42 @@ def notify_windows(title, message):
         ).show()
     except Exception as exc:
         print(f"通知发送失败: {exc}")
+
+
+# ── 开机自启 ──────────────────────────────────────────────────────────
+def _autostart_command():
+    """自启命令：用 pythonw 无窗口启动本脚本绝对路径"""
+    pyw = Path(sys.executable).with_name("pythonw.exe")
+    if not pyw.exists():  # 兜底：个别环境无独立 pythonw
+        pyw = Path(sys.executable)
+    return f'"{pyw}" "{Path(__file__).resolve()}"'
+
+
+def is_autostart_enabled():
+    """当前是否已注册开机自启，且命令与本次启动路径一致"""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REG_KEY) as k:
+            return winreg.QueryValueEx(k, AUTOSTART_NAME)[0] == _autostart_command()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
+def set_autostart(enable):
+    """开启/关闭开机自启（HKCU Run 项），返回是否成功"""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REG_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if enable:
+                winreg.SetValueEx(k, AUTOSTART_NAME, 0, winreg.REG_SZ, _autostart_command())
+            else:
+                winreg.DeleteValue(k, AUTOSTART_NAME)
+        return True
+    except FileNotFoundError:
+        return not enable  # 关闭时本就不存在，视为成功
+    except OSError as exc:
+        print(f"自启设置失败: {exc}")
+        return False
 
 
 # ── 图标生成 ──────────────────────────────────────────────────────────
@@ -361,6 +424,7 @@ class GLMWidget:
         # 右键菜单
         self._menu = tk.Menu(self.root, tearoff=0)
         self._menu.add_command(label="立即刷新", command=self._do_refresh)
+        self._menu.add_command(label="开机自启（点击切换）", command=self._toggle_autostart)
         self._menu.add_separator()
         self._menu.add_command(label="退出", command=self._quit)
         self.root.bind("<Button-3>", lambda e: self._menu.tk_popup(e.x_root, e.y_root))
@@ -468,6 +532,17 @@ class GLMWidget:
 
     def _schedule(self):
         self.root.after(REFRESH_INTERVAL * 1000, self._do_refresh)
+
+    # 开机自启 -------------------------------------------------------
+    def _toggle_autostart(self):
+        was_on = is_autostart_enabled()
+        if set_autostart(not was_on):
+            if was_on:
+                notify_windows("开机自启已关闭", "不再开机自动启动仪表盘")
+            else:
+                notify_windows("开机自启已开启", "登录 Windows 后将自动启动仪表盘")
+        else:
+            notify_windows("开机自启设置失败", "请检查注册表写权限后重试")
 
     # 退出 -----------------------------------------------------------
     def _quit(self):

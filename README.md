@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.8
+# GLM Plan Dashboard v1.9
 
 GLM 套餐用量悬浮小组件 + 番茄工作闹钟，在 Windows 桌面顶部居中置顶悬浮：上行显示 Token 剩余量，下行显示番茄钟倒计时。
 
@@ -34,12 +34,19 @@ GLM 套餐用量悬浮小组件 + 番茄工作闹钟，在 Windows 桌面顶部�
 
 ```bash
 pip install -r requirements.txt
-python main.py
+python setup_config.py     # 一次性：把当前 API 配置固化到项目 config.json（脱离 cc）
+python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 ```
 
-或直接双击 `start.bat`（无控制台窗口启动）。
+**脱离 Claude Code 独立运行**：仪表盘默认从 `~/.claude/settings.json` 读配置；运行 `setup_config.py` 会把配置复制到项目内 `config.json`（已被 `.gitignore` 忽略，不会上传 token），之后即便卸载 cc、更换 cc 配置也能正常运行。
+
+**开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
 ## 更新日志
+
+### v1.9
+- **彻底脱离 Claude Code 独立运行**：新增项目本地 `config.json`，配置读取优先级改为 `config.json > 环境变量 > ~/.claude/settings.json`；提供 `setup_config.py` 一键把当前配置固化进项目，卸载 cc 或更换其配置均不影响仪表盘
+- **补齐开机自启**：右键菜单新增「开机自启（点击切换）」，写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 注册表项，登录后用 `pythonw` 无窗口自动启动（v1.4 仅修复了被自启调用时的 stdout 崩溃，并未真正实现注册自启，本次补全）
 
 ### v1.8
 - **修复 Python 3.13 升级后悬浮窗不可见的问题**：Python 3.13 自带的新版 Tk 中，`Tk().winfo_id()` 返回的是 `TkChild` 子窗口句柄，而非真正的顶层窗口句柄，导致 Win32 分层窗口（`WS_EX_LAYERED` + `UpdateLayeredWindow`）渲染失效、悬浮窗全透明不可见（进程仍在后台静默运行）。新增 `_toplevel_hwnd()` 沿 `GetParent` 上溯到真正的顶层窗口句柄后再渲染，兼容新旧 Tk 版本
