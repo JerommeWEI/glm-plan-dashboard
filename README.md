@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.7
+# GLM Plan Dashboard v1.8
 
 GLM 套餐用量悬浮小组件 + 番茄工作闹钟，在 Windows 桌面顶部居中置顶悬浮：上行显示 Token 剩余量，下行显示番茄钟倒计时。
 
@@ -40,6 +40,9 @@ python main.py
 或直接双击 `start.bat`（无控制台窗口启动）。
 
 ## 更新日志
+
+### v1.8
+- **修复 Python 3.13 升级后悬浮窗不可见的问题**：Python 3.13 自带的新版 Tk 中，`Tk().winfo_id()` 返回的是 `TkChild` 子窗口句柄，而非真正的顶层窗口句柄，导致 Win32 分层窗口（`WS_EX_LAYERED` + `UpdateLayeredWindow`）渲染失效、悬浮窗全透明不可见（进程仍在后台静默运行）。新增 `_toplevel_hwnd()` 沿 `GetParent` 上溯到真正的顶层窗口句柄后再渲染，兼容新旧 Tk 版本
 
 ### v1.7
 - **番茄钟时长调整**：工作时长由 45 分钟延长至 50 分钟，休息时长由 5 分钟延长至 10 分钟（每个周期合计 1 小时），同步更新阶段切换通知文案

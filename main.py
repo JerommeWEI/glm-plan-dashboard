@@ -354,7 +354,8 @@ class GLMWidget:
 
         # 确保窗口已创建，再设置分层窗口
         self.root.update_idletasks()
-        self._hwnd = int(self.root.winfo_id())
+        # 注意：3.13+ 新版 Tk 的 winfo_id() 返回 TkChild 子窗口，分层窗口必须挂顶层
+        self._hwnd = self._toplevel_hwnd(int(self.root.winfo_id()))
         self._setup_layered()
 
         # 右键菜单
@@ -377,6 +378,21 @@ class GLMWidget:
 
         # 显示初始状态
         self._render()
+
+    @staticmethod
+    def _toplevel_hwnd(hwnd):
+        """沿 GetParent 向上找到真正的顶层窗口句柄。
+
+        Python 3.13+ 的新版 Tk 中，Tk().winfo_id() 返回的是 TkChild 子窗口，
+        而非顶层；Win32 分层窗口必须挂在顶层窗口上才能被合成显示，
+        否则窗口会全透明不可见（进程在跑但屏幕看不到）。
+        """
+        user32 = ctypes.windll.user32
+        parent = user32.GetParent(hwnd)
+        while parent:
+            hwnd = parent
+            parent = user32.GetParent(hwnd)
+        return hwnd
 
     # Win32 分层窗口 -----------------------------------------------
     def _setup_layered(self):
