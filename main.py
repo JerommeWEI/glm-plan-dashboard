@@ -19,11 +19,13 @@ from PIL import Image, ImageDraw, ImageFont
 from winotify import Notification
 
 # pythonw 在无控制台环境（任务计划程序 / 开机自启）下 sys.stdout/stderr 为 None，
-# 此时 print() 会抛 AttributeError 导致进程崩溃，重定向到 devnull 规避。
+# 此时 print() 会抛 AttributeError 导致进程崩溃；重定向到项目内 dashboard.log，
+# 既规避崩溃，又保留运行期日志（API 错误 / 未捕获异常 traceback）便于故障定位。
+_LOG_PATH = Path(__file__).resolve().parent / "dashboard.log"
 if sys.stdout is None:
-    sys.stdout = open(os.devnull, "w")
+    sys.stdout = open(_LOG_PATH, "a", encoding="utf-8")
 if sys.stderr is None:
-    sys.stderr = open(os.devnull, "w")
+    sys.stderr = open(_LOG_PATH, "a", encoding="utf-8")
 
 REFRESH_INTERVAL = 300  # Token 刷新：5 分钟
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"

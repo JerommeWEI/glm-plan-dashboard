@@ -40,9 +40,14 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 
 **脱离 Claude Code 独立运行**：仪表盘默认从 `~/.claude/settings.json` 读配置；运行 `setup_config.py` 会把配置复制到项目内 `config.json`（已被 `.gitignore` 忽略，不会上传 token），之后即便卸载 cc、更换 cc 配置也能正常运行。
 
+> ⚠️ **刷新 token 注意**：`setup_config.py` 仅在 `config.json` 不存在/为空时才从 `settings.json` 拉取配置；若 `config.json` 已含旧 token（例如 cc 里换号后），它会读到旧值并原样写回、**不会刷新**。换 token 时请直接编辑 `config.json`，或先删除/清空它再跑 `setup_config.py`。
+
 **开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
 ## 更新日志
+
+### v1.10
+- **运行日志落盘便于故障定位**：pythonw（任务计划程序 / 开机自启）无控制台环境下，原先把 `sys.stdout/stderr` 重定向到 `os.devnull`，运行期错误无处可查；改为写入项目内 `dashboard.log`（append），API 错误与未捕获异常的 traceback 均会落盘。`dashboard.log` 已加入 `.gitignore`，不会上传。
 
 ### v1.9
 - **彻底脱离 Claude Code 独立运行**：新增项目本地 `config.json`，配置读取优先级改为 `config.json > 环境变量 > ~/.claude/settings.json`；提供 `setup_config.py` 一键把当前配置固化进项目，卸载 cc 或更换其配置均不影响仪表盘
