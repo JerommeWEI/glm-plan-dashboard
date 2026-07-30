@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.9
+# GLM Plan Dashboard v1.11
 
 GLM 套餐用量悬浮小组件 + 番茄工作闹钟，在 Windows 桌面顶部居中置顶悬浮：上行显示 Token 剩余量，下行显示番茄钟倒计时。
 
@@ -40,11 +40,14 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 
 **脱离 Claude Code 独立运行**：仪表盘默认从 `~/.claude/settings.json` 读配置；运行 `setup_config.py` 会把配置复制到项目内 `config.json`（已被 `.gitignore` 忽略，不会上传 token），之后即便卸载 cc、更换 cc 配置也能正常运行。
 
-> ⚠️ **刷新 token 注意**：`setup_config.py` 仅在 `config.json` 不存在/为空时才从 `settings.json` 拉取配置；若 `config.json` 已含旧 token（例如 cc 里换号后），它会读到旧值并原样写回、**不会刷新**。换 token 时请直接编辑 `config.json`，或先删除/清空它再跑 `setup_config.py`。
+> **刷新 token**：换号或 token 过期后，直接重跑 `python setup_config.py` 即可——它会跳过项目内已有的 `config.json`，从 `~/.claude/settings.json`（或环境变量）读取最新配置并写入 `config.json`（v1.11 起）。当然也支持直接手动编辑 `config.json`。
 
 **开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
 ## 更新日志
+
+### v1.11
+- **修复 `setup_config.py` 无法刷新 token 的问题**：此前 `read_raw_config` 优先读取项目 `config.json`，导致 `config.json` 已存在时重跑 `setup_config.py` 只会把旧 token 读出再写回、永远同步不到 `~/.claude/settings.json` 的新值（v1.9 引入该配置层级时的副作用）。为 `read_raw_config` 新增 `skip_local_config` 参数（默认 `False`，仪表盘运行时的 `load_config` 行为不变、仍优先读 `config.json`），`setup_config.py` 调用时传 `True`，强制从「环境变量 → `~/.claude/settings.json`」读取后写入 `config.json`。今后换 token 直接重跑 `setup_config.py` 即可，无需手动编辑或删除 `config.json`。
 
 ### v1.10
 - **运行日志落盘便于故障定位**：pythonw（任务计划程序 / 开机自启）无控制台环境下，原先把 `sys.stdout/stderr` 重定向到 `os.devnull`，运行期错误无处可查；改为写入项目内 `dashboard.log`（append），API 错误与未捕获异常的 traceback 均会落盘。`dashboard.log` 已加入 `.gitignore`，不会上传。

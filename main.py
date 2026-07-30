@@ -84,14 +84,18 @@ class _BMPINFOHEADER(ctypes.Structure):
 
 
 # ── 配置 ──────────────────────────────────────────────────────────────
-def read_raw_config():
+def read_raw_config(skip_local_config=False):
     """读取原始 API 配置（未裁剪 base_url），优先级：
-    项目 config.json > 环境变量 > ~/.claude/settings.json（兜底，兼容 cc）"""
+    项目 config.json > 环境变量 > ~/.claude/settings.json（兜底，兼容 cc）
+
+    skip_local_config=True 时跳过项目 config.json，仅从环境变量与
+    ~/.claude/settings.json 读取——供 setup_config.py 同步外部最新配置，
+    避免「读出旧 config.json 再写回」的自我循环。"""
     base_url = ""
     token = ""
 
     # 1. 项目本地 config.json（独立运行首选）
-    if CONFIG_PATH.exists():
+    if not skip_local_config and CONFIG_PATH.exists():
         try:
             with open(CONFIG_PATH, encoding="utf-8") as f:
                 cfg = json.load(f)
