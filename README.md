@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.11
+# GLM Plan Dashboard v1.12
 
 GLM 套餐用量悬浮小组件 + 番茄工作闹钟，在 Windows 桌面顶部居中置顶悬浮：上行显示 Token 剩余量，下行显示番茄钟倒计时。
 
@@ -45,6 +45,9 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 **开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
 ## 更新日志
+
+### v1.12
+- **用量 API 调用方式对齐 cc cli**：`fetch_usage` 的 base_domain 提取从 `base_url.split("/api/anthropic")` 改为标准 `urlparse`（取 `scheme://host`），与 glm-plan-usage 插件 `query-usage.mjs` 的 `new URL()` 等价，不再依赖 URL 必须含 `/api/anthropic` 子串；新增已知平台校验（`api.z.ai` / `open.bigmodel.cn` / `dev.bigmodel.cn`），未识别域名直接跳过请求并记录，不再发出注定失败的调用；请求头 `Accept-Language` 由 `zh-CN,zh` 改为 `en-US,en`。端点（`/api/monitor/usage/quota/limit`）与认证方式（裸 token）不变，解析逻辑（取 `TOKENS_LIMIT` 中 `nextResetTime` 最小的短期窗口）不变。
 
 ### v1.11
 - **修复 `setup_config.py` 无法刷新 token 的问题**：此前 `read_raw_config` 优先读取项目 `config.json`，导致 `config.json` 已存在时重跑 `setup_config.py` 只会把旧 token 读出再写回、永远同步不到 `~/.claude/settings.json` 的新值（v1.9 引入该配置层级时的副作用）。为 `read_raw_config` 新增 `skip_local_config` 参数（默认 `False`，仪表盘运行时的 `load_config` 行为不变、仍优先读 `config.json`），`setup_config.py` 调用时传 `True`，强制从「环境变量 → `~/.claude/settings.json`」读取后写入 `config.json`。今后换 token 直接重跑 `setup_config.py` 即可，无需手动编辑或删除 `config.json`。

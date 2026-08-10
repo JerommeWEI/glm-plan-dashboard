@@ -13,6 +13,7 @@ import tkinter as tk
 import winreg
 from pathlib import Path
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from PIL import Image, ImageDraw, ImageFont
@@ -120,25 +121,43 @@ def read_raw_config(skip_local_config=False):
 
 
 def load_config():
-    """读取 API 配置并裁剪 base_url 为 base_domain，返回 (base_domain, token) 或 (None, None)"""
+    """读取 API 配置，按 cc cli 方式从 base_url 提取 base_domain（scheme://host），
+    返回 (base_domain, token) 或 (None, None)"""
     base_url, token = read_raw_config()
     if not base_url or not token:
         return None, None
-    base_domain = base_url.split("/api/anthropic")[0] if "/api/anthropic" in base_url else base_url
-    return base_domain, token
+    parsed = urlparse(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        return None, None
+    return f"{parsed.scheme}://{parsed.netloc}", token
 
 
 # ── API ───────────────────────────────────────────────────────────────
+# 用量接口支持的平台域名，与 cc cli 的 glm-plan-usage 插件（query-usage.mjs）保持一致：
+# api.z.ai（国际）/ open.bigmodel.cn / dev.bigmodel.cn（智谱）
+SUPPORTED_USAGE_HOSTS = ("api.z.ai", "open.bigmodel.cn", "dev.bigmodel.cn")
+
+
 def fetch_usage():
-    """调用 GLM API 获取 Token 用量百分比，返回 dict 或 None"""
+    """调用已配置 API 获取短期 Token 用量百分比，返回 dict 或 None。
+
+    调用方式（域名解析 / 请求头 / 平台识别）对齐 cc cli 的 query-usage.mjs：
+    从 ANTHROPIC_BASE_URL 取 scheme://host 作为 base_domain，校验为已知 GLM 平台后，
+    请求 {base_domain}/api/monitor/usage/quota/limit。
+    """
     base_domain, token = load_config()
     if not base_domain:
+        return None
+
+    host = urlparse(base_domain).hostname or ""
+    if host not in SUPPORTED_USAGE_HOSTS:
+        print(f"不支持的用量接口域名: {host}（仅支持 z.ai / open.bigmodel.cn / dev.bigmodel.cn）")
         return None
 
     url = f"{base_domain}/api/monitor/usage/quota/limit"
     req = Request(url, headers={
         "Authorization": token,
-        "Accept-Language": "zh-CN,zh",
+        "Accept-Language": "en-US,en",
         "Content-Type": "application/json",
     })
 
@@ -146,9 +165,16 @@ def fetch_usage():
         with urlopen(req, timeout=10) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             data = body.get("data") or body
-            for item in data.get("limits", []):
-                if item.get("type") == "TOKENS_LIMIT":
-                    return {"percentage": float(item.get("percentage", 0))}
+            token_limits = [
+                item for item in data.get("limits", [])
+                if item.get("type") == "TOKENS_LIMIT"
+            ]
+            if token_limits:
+                short_term_limit = min(
+                    token_limits,
+                    key=lambda item: item.get("nextResetTime", float("inf")),
+                )
+                return {"percentage": float(short_term_limit.get("percentage", 0))}
     except (URLError, json.JSONDecodeError, KeyError) as exc:
         print(f"API 错误: {exc}")
 
