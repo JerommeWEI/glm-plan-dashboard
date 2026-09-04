@@ -353,9 +353,9 @@ def create_widget_image(token_remaining, pomo_stage, pomo_remaining_sec, dim):
                         outline=HAIRLINE, width=2)
     d.line([(24 * s, 2 * s), ((WIDGET_W - 24) * s, 2 * s)], fill=TOP_LIGHT, width=s)
 
-    # ── 上段：TOKEN 小标签 + 剩余大数字 ──
-    _draw_tracked(d, cx, 18 * s, "TOKEN", _load_font(BOLD_FONT, 10 * s),
-                  int(2 * s), TEXT_DIM)
+    # ── 上段：TOKEN 标签 + 剩余大数字 ──
+    _draw_tracked(d, cx, 18 * s, "TOKEN", _load_font(BOLD_FONT, 14 * s),
+                  int(1 * s), TEXT_SUB)
 
     remaining = min(max(token_remaining, 0), 100)
     num_font = _load_font(NUM_FONT, 26 * s)
@@ -369,7 +369,7 @@ def create_widget_image(token_remaining, pomo_stage, pomo_remaining_sec, dim):
     num_color = RED if remaining < 15 else TEXT_MAIN  # 告急时数字同步染红
     d.text((x, baseline), num, font=num_font, fill=num_color, anchor="ls")
     d.text((x + num_w + gap, baseline), "%", font=pct_font,
-           fill=(255, 255, 255, 170), anchor="ls")
+           fill=num_color[:3] + (170,), anchor="ls")
 
     _draw_capsule(d, cx, 74 * s, content_w, 5 * s,
                   remaining / 100, _remaining_color(remaining))
@@ -398,11 +398,11 @@ def create_widget_image(token_remaining, pomo_stage, pomo_remaining_sec, dim):
     _draw_tabular_timer(d, cx, 139 * s, pomo_remaining_sec,
                         _load_font(NUM_FONT, 20 * s), dim)
 
-    # 阶段细进度条（随秒缩减，「活着」的最低调表达）
+    # 阶段胶囊进度条（随秒缩减，「活着」的最低调表达）
     total_sec = (POMODORO_REST_MIN if pomo_stage == "rest" else POMODORO_WORK_MIN) * 60
     frac = max(0, min(1, pomo_remaining_sec / total_sec))
     bar_color = (255, 255, 255, 60) if dim else stage_color
-    _draw_capsule(d, cx, 160 * s, content_w, 3 * s, frac, bar_color)
+    _draw_capsule(d, cx, 160 * s, content_w, 5 * s, frac, bar_color)
 
     return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
 
