@@ -1,7 +1,7 @@
-"""GLM 套餐用量悬浮小组件 + 番茄工作闹钟 — 右下角置顶悬浮（Win32 分层窗口）
+"""GLM 套餐用量悬浮小组件 + 番茄工作闹钟 — 竖版侧栏贴靠屏幕右缘（Win32 分层窗口）
 
-上行：电池图标显示 Token 剩余百分比
-下行：番茄钟倒计时（50 分钟工作 ↔ 10 分钟休息，自动循环）
+Apple 风格竖版卡片：上段 Token 剩余百分比 + 胶囊进度条，
+下段番茄钟倒计时（50 分钟工作 ↔ 10 分钟休息，自动循环）+ 细进度条。
 """
 
 import ctypes
@@ -263,111 +263,148 @@ def _load_font(candidates, size):
     return _FONT_CACHE[key]
 
 
+# ── UI 规格（Apple 风格竖版侧栏，与 cc cli 研讨定稿：iOS 暗色系统色 + 发丝线）──
+WIDGET_W, WIDGET_H = 84, 192    # 最终窗口尺寸（逻辑像素）
+SS = 3                          # 超采样倍率：先画 3 倍大图再 LANCZOS 缩小抗锯齿
+CARD_BG = (28, 28, 30, 190)     # #1C1C1E @75%，iOS secondarySystemBackground(dark)
+HAIRLINE = (255, 255, 255, 26)  # 发丝描边 / 分隔线
+TOP_LIGHT = (255, 255, 255, 38)  # 顶部内高光（伪玻璃上光）
+TEXT_MAIN = (255, 255, 255, 255)
+TEXT_SUB = (255, 255, 255, 185)
+TEXT_DIM = (255, 255, 255, 100)
+BAR_TRACK = (255, 255, 255, 36)
+GREEN = (48, 209, 88, 255)      # iOS systemGreen：Token ≥40%
+ORANGE = (255, 159, 10, 255)    # iOS systemOrange：15–40%
+RED = (255, 69, 58, 255)        # iOS systemRed：<15%（数字同步染红）
+FOCUS_COLOR = (191, 90, 242, 255)   # Apple 专注紫：工作阶段
+REST_COLOR = (100, 210, 255, 255)   # teal：休息阶段
+
+NUM_FONT = ("seguisb.ttf",)   # Segoe UI Semibold（数字）
+BOLD_FONT = ("segoeuib.ttf",)  # Segoe UI Bold（TOKEN 标签）
+ZH_FONT = ("msyhbd.ttc", "msyh.ttc", "simhei.ttf")  # 微软雅黑粗体（中文）
+
+
 def _remaining_color(remaining):
-    """根据剩余百分比返回颜色：>40% 绿，20-40% 黄，<20% 红"""
-    if remaining > 40:
-        return (76, 175, 80)
-    if remaining > 20:
-        return (255, 193, 7)
-    return (244, 67, 54)
+    """Token 剩余分级色：≥40% 绿 / 15–40% 橙 / <15% 红（iOS 系统色）"""
+    if remaining >= 40:
+        return GREEN
+    if remaining >= 15:
+        return ORANGE
+    return RED
 
 
-def _pomo_label(stage, remaining_sec):
-    """番茄钟显示文字，如 '工作 42:30'"""
-    stage_zh = "工作" if stage == "work" else "休息"
-    m, s = divmod(max(0, remaining_sec), 60)
-    return f"{stage_zh} {m:02d}:{s:02d}"
+def _stage_color(stage):
+    """番茄钟阶段色：工作=专注紫、休息=teal（刻意避开电量三色，语义不撞车）"""
+    return REST_COLOR if stage == "rest" else FOCUS_COLOR
 
 
-def _draw_battery(d, cw, half_h, remaining):
-    """在高度 half_h 的区域内垂直居中绘制电池图标 + 百分比"""
-    color = _remaining_color(remaining)
-    body_w, body_h = 210, 44
-    cap_w, cap_h = 8, 18
+def _draw_tracked(d, cx, y_top, text, font, tracking, fill):
+    """带字距的逐字符绘制（模拟 SF Micro 小标签），整串水平居中于 cx"""
+    total = sum(font.getlength(ch) for ch in text) + tracking * (len(text) - 1)
+    x = cx - total / 2
+    for ch in text:
+        d.text((x, y_top), ch, font=font, fill=fill)
+        x += font.getlength(ch) + tracking
 
-    total_w = body_w + cap_w
-    bx1 = (cw - total_w) // 2
-    by1 = (half_h - body_h) // 2
-    bx2 = bx1 + body_w
-    by2 = by1 + body_h
 
-    # 正极凸起
-    d.rounded_rectangle(
-        [bx2, half_h // 2 - cap_h // 2, bx2 + cap_w, half_h // 2 + cap_h // 2],
-        radius=2, fill=(180, 180, 180, 255),
-    )
-    # 外壳
-    d.rounded_rectangle(
-        [bx1, by1, bx2, by2], radius=5,
-        outline=(220, 220, 220, 255), width=2,
-    )
-
-    # 填充条
-    inner = 4
-    ix1, iy1 = bx1 + inner, by1 + inner
-    ix2, iy2 = bx2 - inner, by2 - inner
-    fill_w = (ix2 - ix1) * min(remaining, 100) / 100
-
-    if fill_w > 1:
-        d.rounded_rectangle(
-            [ix1, iy1, ix1 + fill_w, iy2],
-            radius=3, fill=(*color, 255),
+def _draw_tabular_timer(d, cx, cy, remaining_sec, font, dim):
+    """等宽步进逐字绘制 MM:SS（伪 tabular，秒针跳动零抖动），冒号每秒呼吸"""
+    m, s = divmod(min(remaining_sec, 99 * 60 + 59), 60)
+    text = f"{m:02d}:{s:02d}"
+    digit_w = font.getlength("0")
+    colon_w = font.getlength(":")
+    total = 4 * digit_w + colon_w
+    colon_alpha = 150 if remaining_sec % 2 else 255  # 冒号每秒呼吸
+    x = cx - total / 2
+    for ch in text:
+        cell = colon_w if ch == ":" else digit_w
+        alpha = (colon_alpha if ch == ":" else 255) if not dim else 70
+        bbox = d.textbbox((0, 0), ch, font=font)
+        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        d.text(
+            (x + (cell - w) / 2 - bbox[0], cy - h / 2 - bbox[1]),
+            ch, font=font, fill=(255, 255, 255, alpha),
         )
-    else:
-        d.rectangle([ix1, iy1, ix1 + 2, iy2], fill=(*color, 255))
+        x += cell
 
-    # 百分比文字（居中在电池内部）
-    font = _load_font(("arialbd.ttf",), 28)
-    label = f"{int(remaining)}%"
-    bbox = d.textbbox((0, 0), label, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-    tx = (bx1 + bx2 - text_w) // 2 - bbox[0]
-    ty = (by1 + by2 - text_h) // 2 - bbox[1]
-    d.text((tx, ty), label, fill=(255, 255, 255, 255), font=font)
+
+def _draw_capsule(d, cx, y, length, height, frac, color):
+    """横向细胶囊进度条：轨道 + 按比例填充（iOS 锁屏电量条形态）"""
+    x = cx - length / 2
+    d.rounded_rectangle([x, y, x + length, y + height],
+                        radius=int(height / 2), fill=BAR_TRACK)
+    if frac > 0.01:
+        fill_w = max(length * frac, height)
+        d.rounded_rectangle([x, y, x + fill_w, y + height],
+                            radius=int(height / 2), fill=color)
 
 
 def create_widget_image(token_remaining, pomo_stage, pomo_remaining_sec, dim):
-    """生成悬浮窗图像：上行电池+Token%，下行番茄钟倒计时（RGBA 逐像素透明圆角）"""
-    cw, ch = 288, 172
+    """生成竖版悬浮窗图像：上段 Token%，下段番茄钟（RGBA 逐像素透明圆角）"""
+    s = SS
+    cw, ch = WIDGET_W * s, WIDGET_H * s
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
+    cx = cw / 2
+    content_w = (WIDGET_W - 2 * 14) * s  # 左右内边距 14 → 内容宽 56
 
-    # 圆角深色背景卡片（整体）
-    d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=30, fill=(40, 40, 40, 255))
+    # 深色圆角卡片 + 发丝描边 + 顶部内高光（无真模糊时的伪玻璃补偿）
+    d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=28 * s, fill=CARD_BG,
+                        outline=HAIRLINE, width=2)
+    d.line([(24 * s, 2 * s), ((WIDGET_W - 24) * s, 2 * s)], fill=TOP_LIGHT, width=s)
 
-    # 中间细分隔线
-    d.line([24, ch // 2, cw - 24, ch // 2], fill=(70, 70, 70, 255), width=1)
+    # ── 上段：TOKEN 小标签 + 剩余大数字 ──
+    _draw_tracked(d, cx, 18 * s, "TOKEN", _load_font(BOLD_FONT, 10 * s),
+                  int(2 * s), TEXT_DIM)
 
-    half_h = ch // 2
+    remaining = min(max(token_remaining, 0), 100)
+    num_font = _load_font(NUM_FONT, 26 * s)
+    pct_font = _load_font(NUM_FONT, 13 * s)
+    num = f"{int(remaining)}"
+    num_w = num_font.getlength(num)
+    pct_w = pct_font.getlength("%")
+    gap = 2 * s
+    x = cx - (num_w + gap + pct_w) / 2
+    baseline = 34 * s + num_font.getmetrics()[0]
+    num_color = RED if remaining < 15 else TEXT_MAIN  # 告急时数字同步染红
+    d.text((x, baseline), num, font=num_font, fill=num_color, anchor="ls")
+    d.text((x + num_w + gap, baseline), "%", font=pct_font,
+           fill=(255, 255, 255, 170), anchor="ls")
 
-    # 上半：电池图标 + Token%
-    _draw_battery(d, cw, half_h, token_remaining)
+    _draw_capsule(d, cx, 74 * s, content_w, 5 * s,
+                  remaining / 100, _remaining_color(remaining))
 
-    # 下半：番茄钟倒计时（需支持中文，依次尝试微软雅黑/黑体/宋体）
-    font = _load_font(("msyhbd.ttc", "msyh.ttc", "simhei.ttf", "simsun.ttc"), 34)
+    # 分隔发丝线（比内容再内缩 8px，不通栏）
+    d.line([(22 * s, 95 * s), ((WIDGET_W - 22) * s, 95 * s)], fill=HAIRLINE, width=s)
 
-    label = _pomo_label(pomo_stage, pomo_remaining_sec)
-    bbox = d.textbbox((0, 0), label, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-    tx = (cw - text_w) // 2 - bbox[0]
-    ty = half_h + (half_h - text_h) // 2 - bbox[1]
+    # ── 下段：阶段点 + 中文阶段词（整组居中）──
+    stage_color = _stage_color(pomo_stage)
+    stage_zh = "休息" if pomo_stage == "rest" else "工作"
+    zh_font = _load_font(ZH_FONT, 14 * s)
+    dot_r = 3 * s
+    dot_gap = 6 * s
+    group_w = dot_r * 2 + dot_gap + zh_font.getlength(stage_zh)
+    gx = cx - group_w / 2
+    row_cy = 111 * s
+    d.ellipse([gx, row_cy - dot_r, gx + dot_r * 2, row_cy + dot_r],
+              fill=stage_color[:3] + (100 if dim else 255,))
+    bbox = d.textbbox((0, 0), stage_zh, font=zh_font)
+    d.text((gx + dot_r * 2 + dot_gap - bbox[0],
+            row_cy - (bbox[3] - bbox[1]) / 2 - bbox[1]),
+           stage_zh, font=zh_font,
+           fill=(255, 255, 255, 70 if dim else TEXT_SUB[3]))
 
-    # 文字颜色：休息=绿、工作=白；闪烁(dim)时切到背景灰，造成闪烁
-    bright = (120, 220, 140) if pomo_stage == "rest" else (255, 255, 255)
-    text_color = (60, 60, 60) if dim else bright
-    d.text((tx, ty), label, fill=(*text_color, 255), font=font)
+    # 倒计时（等宽步进 + 冒号呼吸）
+    _draw_tabular_timer(d, cx, 139 * s, pomo_remaining_sec,
+                        _load_font(NUM_FONT, 20 * s), dim)
 
-    # 应用 92% 不透明度（整体半透明玻璃效果）
-    alpha = img.getchannel("A")
-    alpha = alpha.point(lambda a: int(a * 0.92))
-    img.putalpha(alpha)
+    # 阶段细进度条（随秒缩减，「活着」的最低调表达）
+    total_sec = (POMODORO_REST_MIN if pomo_stage == "rest" else POMODORO_WORK_MIN) * 60
+    frac = max(0, min(1, pomo_remaining_sec / total_sec))
+    bar_color = (255, 255, 255, 60) if dim else stage_color
+    _draw_capsule(d, cx, 160 * s, content_w, 3 * s, frac, bar_color)
 
-    # 缩小 42%
-    img = img.resize((int(cw * 0.42), int(ch * 0.42)), Image.LANCZOS)
-
-    return img
+    return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
 
 
 # ── Win32 分层窗口渲染 ────────────────────────────────────────────────
@@ -440,11 +477,12 @@ class GLMWidget:
         self.root.overrideredirect(True)       # 无边框
         self.root.attributes("-topmost", True)  # 置顶
 
-        # 窗口尺寸 & 默认位置（屏幕1 顶部水平居中）
-        self._win_w, self._win_h = 121, 73
+        # 窗口尺寸 & 默认位置（贴靠屏幕右缘，悬空 8px、竖直居中）
+        self._win_w, self._win_h = WIDGET_W, WIDGET_H
         sw = self.root.winfo_screenwidth()
-        x = (sw - self._win_w) // 2
-        y = 10  # 顶部边距
+        sh = self.root.winfo_screenheight()
+        x = sw - self._win_w - 8
+        y = (sh - self._win_h) // 2
         self.root.geometry(f"{self._win_w}x{self._win_h}+{x}+{y}")
 
         # 确保窗口已创建，再设置分层窗口

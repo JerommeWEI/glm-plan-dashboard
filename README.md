@@ -1,18 +1,18 @@
-# GLM Plan Dashboard v1.12
+# GLM Plan Dashboard v1.13
 
-GLM 套餐用量悬浮小组件 + 番茄工作闹钟，在 Windows 桌面顶部居中置顶悬浮：上行显示 Token 剩余量，下行显示番茄钟倒计时。
+GLM 套餐用量悬浮小组件 + 番茄工作闹钟，Apple 风格竖版卡片贴靠屏幕右缘竖直居中：上段显示 Token 剩余量，下段显示番茄钟倒计时。
 
 ## 功能
 
-**Token 用量（上行）**
-- 电池图标实时显示 Token 剩余百分比
-- 颜色随余量变化：绿色（>40%）→ 黄色（20%-40%）→ 红色（<20%）
+**Token 用量（上段）**
+- 「TOKEN」粗体小标签 + 大号剩余百分比数字 + 胶囊进度条
+- 颜色随余量变化（iOS 系统色）：绿色（≥40%）→ 橙色（15%-40%）→ 红色（<15%，数字同步染红）
 - 每 5 分钟自动刷新数据
 
-**番茄工作闹钟（下行）**
+**番茄工作闹钟（下段）**
 - 50 分钟工作 ↔ 10 分钟休息（每周期 1 小时），自动循环
-- 倒计时实时显示，工作白色 / 休息绿色
-- 阶段结束时弹出 Windows 通知（番茄图标 + 应用名「GLM 仪表盘」），倒计时区域闪烁变色
+- 阶段圆点（工作=专注紫 / 休息=teal）+ 粗体阶段词 + 等宽倒计时（冒号每秒呼吸）+ 细进度条
+- 阶段结束时弹出 Windows 通知（番茄图标 + 应用名「GLM 仪表盘」），倒计时区域闪烁
 
 **通用**
 - 右键菜单：立即刷新 / 退出
@@ -45,6 +45,13 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 **开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
 ## 更新日志
+
+### v1.13
+- **竖版 Apple 风格重设计（与 cc cli 研讨定稿）**：悬浮窗从 121×73 横条改为 **84×192 竖版卡片**，默认停靠屏幕右缘（悬空 8px、竖直居中），不再是顶部横条
+- **配色升级为 iOS 暗色系统色**：卡片 `#1C1C1E` @75% 半透明 + 1px 白色发丝描边 + 顶部内高光（伪玻璃质感）；Token 分级色改为绿 `#30D158`（≥40%）/ 橙 `#FF9F0A`（15-40%）/ 红 `#FF453A`（<15%，大数字同步染红）
+- **版式重排**：上段「TOKEN」粗体字距标签（10px Segoe UI Bold）+ 26px Segoe UI Semibold 大数字（`%` 缩小上标）+ 5px 胶囊进度条；发丝分隔线（两端内缩）；下段阶段圆点（工作=专注紫 `#BF5AF2` / 休息=teal `#64D2FF`，刻意避开电量三色）+ 粗体阶段词（14px 微软雅黑粗体）+ 20px 等宽倒计时 + 3px 细进度条（随秒缩减）
+- **数字细节**：倒计时逐字符等宽步进绘制（伪 tabular，秒针跳动零抖动），冒号每秒呼吸（alpha 255↔150）
+- 抗锯齿改为 3 倍超采样（252×576 画布 → LANCZOS 缩小）
 
 ### v1.12
 - **用量 API 调用方式对齐 cc cli**：`fetch_usage` 的 base_domain 提取从 `base_url.split("/api/anthropic")` 改为标准 `urlparse`（取 `scheme://host`），与 glm-plan-usage 插件 `query-usage.mjs` 的 `new URL()` 等价，不再依赖 URL 必须含 `/api/anthropic` 子串；新增已知平台校验（`api.z.ai` / `open.bigmodel.cn` / `dev.bigmodel.cn`），未识别域名直接跳过请求并记录，不再发出注定失败的调用；请求头 `Accept-Language` 由 `zh-CN,zh` 改为 `en-US,en`。端点（`/api/monitor/usage/quota/limit`）与认证方式（裸 token）不变，解析逻辑（取 `TOKENS_LIMIT` 中 `nextResetTime` 最小的短期窗口）不变。
