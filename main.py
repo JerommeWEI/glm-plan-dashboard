@@ -308,7 +308,7 @@ def _pomo_state(now=None):
       stage     "work" / "rest" / "off"（非工作时段）
       label     显示词：工作/休息，或 off 时的 待机/午休/下班/假日
       remaining 剩余秒（off 时为下次开工 HH:MM 的编码值）
-      progress  当前阶段进度 0~1（off 恒 0）
+      progress  阶段剩余比例 0~1（与倒计时数字同向递减；off 恒 0）
       next_time off 时下一个时段开始时刻 "HH:MM"
     """
     now = now or datetime.now()
@@ -345,7 +345,7 @@ def _pomo_state(now=None):
         "stage": stage,
         "label": "工作" if stage == "work" else "休息",
         "remaining": math.ceil(remain),
-        "progress": 1 - remain / total,
+        "progress": remain / total,  # 剩余比例：与倒计时、Token 条同向递减，全卡统一
         "next_time": "",
     }
 
