@@ -5,16 +5,21 @@ Apple 风格竖版卡片：上段 Token 剩余百分比 + 胶囊进度条，
 """
 
 import ctypes
+import ipaddress
 import json
+import math
 import os
+import socket
 import sys
 import threading
+import time
 import tkinter as tk
 import winreg
+from datetime import datetime, time as dtime
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from PIL import Image, ImageDraw, ImageFont
 from winotify import Notification
@@ -30,7 +35,12 @@ if sys.stderr is None:
 
 REFRESH_INTERVAL = 300  # Token 刷新：5 分钟
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
-CONFIG_PATH = Path(__file__).resolve().parent / "config.json"  # 项目本地独立配置（脱离 cc）
+CONFIG_PATH = Path(__file__).resolve().parent / "config.json"  # 项目本地独立配置（脱离 cc 的兜底）
+# ZCode 的 API 配置（最高优先级，自动跟随其更新）：
+#   cli/config.json  记录当前选中供应商 model.providerId
+#   v2/config.json   存各供应商的 apiKey / baseURL（provider[<id>].options）
+ZCODE_CLI_CONFIG_PATH = Path.home() / ".zcode" / "cli" / "config.json"
+ZCODE_PROVIDERS_PATH = Path.home() / ".zcode" / "v2" / "config.json"
 ICON_PATH = Path(__file__).resolve().parent / "tomato.ico"  # AUMID 应用图标
 ICON_PNG = Path(__file__).resolve().parent / "tomato.png"   # toast 内联图标
 AUMID = "GlmDashboard"  # 应用模型 ID（系统通知来源标识）
@@ -39,9 +49,13 @@ AUMID = "GlmDashboard"  # 应用模型 ID（系统通知来源标识）
 AUTOSTART_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "GlmDashboard"
 
-# 番茄钟配置：50 分钟工作 ↔ 10 分钟休息（每周期 1 小时），自动循环
-POMODORO_WORK_MIN = 50
-POMODORO_REST_MIN = 10
+# 番茄钟作息（v1.16）：锚定工作日作息表——9:00-11:30 / 13:30-18:00 两个时段内
+# 连续跑「45 分钟工作 + 15 分钟休息」，时段尾自然截断（上午/下午各留一段 30 分钟
+# 收尾工作）；时段外不计时（待机/午休/下班/假日）。节假日与调休补班由
+# chinese-calendar 判定（见 _is_workday），无需手动配置。
+POMODORO_WORK_MIN = 45
+POMODORO_REST_MIN = 15
+WORK_SESSIONS = ((dtime(9, 0), dtime(11, 30)), (dtime(13, 30), dtime(18, 0)))
 
 # ── Win32 常量与结构体 ────────────────────────────────────────────────
 WS_EX_LAYERED = 0x80000
@@ -85,23 +99,64 @@ class _BMPINFOHEADER(ctypes.Structure):
 
 
 # ── 配置 ──────────────────────────────────────────────────────────────
+def _read_zcode_config():
+    """读取 ZCode 当前生效的 API 配置，返回 (base_url, token)。
+
+    每次调用都现读 ZCode 的两个配置文件，因此 ZCode 里换 key / 换供应商后
+    仪表盘无需任何手动同步，最迟一个刷新周期（5 分钟）自动生效。
+
+    活动供应商取不到可用 key 时（如切换到 OAuth 类套餐，token 存在
+    ZCode 加密凭据库中读不到），退而取配置里任一已启用且带 key 的供应商
+    保持仪表盘可用；再不行返回 ("", "") 交由后续来源兜底。
+    """
+    try:
+        with open(ZCODE_PROVIDERS_PATH, encoding="utf-8") as f:
+            providers = json.load(f).get("provider", {})
+    except (json.JSONDecodeError, OSError):
+        return "", ""
+
+    try:
+        with open(ZCODE_CLI_CONFIG_PATH, encoding="utf-8") as f:
+            active_id = json.load(f).get("model", {}).get("providerId", "")
+    except (json.JSONDecodeError, OSError):
+        active_id = ""
+
+    def _usable(pid):
+        options = (providers.get(pid) or {}).get("options", {})
+        return options.get("baseURL", ""), options.get("apiKey", "")
+
+    base_url, token = _usable(active_id)
+    if base_url and token:
+        return base_url, token
+
+    for pid, spec in providers.items():
+        if pid == active_id or not spec.get("enabled"):
+            continue
+        base_url, token = _usable(pid)
+        if base_url and token:
+            print(f"ZCode 活动供应商 {active_id or '(未指定)'} 无可用 API key，改用 {pid}")
+            return base_url, token
+    return "", ""
+
+
 def read_raw_config(skip_local_config=False):
     """读取原始 API 配置（未裁剪 base_url），优先级：
-    项目 config.json > 环境变量 > ~/.claude/settings.json（兜底，兼容 cc）
+    ZCode 当前配置（自动跟随更新） > 项目 config.json > 环境变量 >
+    ~/.claude/settings.json（兜底，兼容 cc）
 
-    skip_local_config=True 时跳过项目 config.json，仅从环境变量与
-    ~/.claude/settings.json 读取——供 setup_config.py 同步外部最新配置，
-    避免「读出旧 config.json 再写回」的自我循环。"""
-    base_url = ""
-    token = ""
+    skip_local_config=True 时跳过项目 config.json，仅从其余来源读取——
+    供 setup_config.py 同步外部最新配置，避免「读出旧 config.json 再写回」
+    的自我循环。"""
+    # 0. ZCode 当前生效的 API（最高优先级，随其配置文件实时更新）
+    base_url, token = _read_zcode_config()
 
-    # 1. 项目本地 config.json（独立运行首选）
-    if not skip_local_config and CONFIG_PATH.exists():
+    # 1. 项目本地 config.json（ZCode 不可用时的独立兜底）
+    if (not base_url or not token) and not skip_local_config and CONFIG_PATH.exists():
         try:
             with open(CONFIG_PATH, encoding="utf-8") as f:
                 cfg = json.load(f)
-            base_url = cfg.get("base_url", "")
-            token = cfg.get("token", "")
+            base_url = base_url or cfg.get("base_url", "")
+            token = token or cfg.get("token", "")
         except (json.JSONDecodeError, OSError) as exc:
             print(f"config.json 读取失败: {exc}")
 
@@ -138,6 +193,35 @@ def load_config():
 SUPPORTED_USAGE_HOSTS = ("api.z.ai", "open.bigmodel.cn", "dev.bigmodel.cn")
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    """拒绝跟随 HTTP 重定向：用量接口固定 200 JSON，任何 3xx 都按异常处理"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = build_opener(_NoRedirect)
+
+
+def _validated_usage_url(base_domain):
+    """SSRF 防护：仅允许 https + 用量接口白名单域名；DNS 解析后逐 IP 阻断
+    私网 / 环回 / 链路本地 / 保留地址。校验失败返回 None，不发请求。"""
+    parsed = urlparse(base_domain)
+    if parsed.scheme != "https" or parsed.hostname not in SUPPORTED_USAGE_HOSTS:
+        return None
+    try:
+        infos = socket.getaddrinfo(
+            parsed.hostname, 443, socket.AF_UNSPEC, socket.SOCK_STREAM
+        )
+    except socket.gaierror:
+        return None
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return None
+    return f"https://{parsed.hostname}/api/monitor/usage/quota/limit"
+
+
 def fetch_usage():
     """调用已配置 API 获取短期 Token 用量百分比，返回 dict 或 None。
 
@@ -154,7 +238,11 @@ def fetch_usage():
         print(f"不支持的用量接口域名: {host}（仅支持 z.ai / open.bigmodel.cn / dev.bigmodel.cn）")
         return None
 
-    url = f"{base_domain}/api/monitor/usage/quota/limit"
+    url = _validated_usage_url(base_domain)
+    if not url:
+        print(f"用量接口 URL 校验失败: {host}（域名白名单 / DNS 解析未通过）")
+        return None
+
     req = Request(url, headers={
         "Authorization": token,
         "Accept-Language": "en-US,en",
@@ -162,7 +250,7 @@ def fetch_usage():
     })
 
     try:
-        with urlopen(req, timeout=10) as resp:
+        with _OPENER.open(req, timeout=10) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             data = body.get("data") or body
             token_limits = [
@@ -174,11 +262,92 @@ def fetch_usage():
                     token_limits,
                     key=lambda item: item.get("nextResetTime", float("inf")),
                 )
-                return {"percentage": float(short_term_limit.get("percentage", 0))}
+                return {
+                    "percentage": float(short_term_limit.get("percentage", 0)),
+                    # 最先重置窗口的重置点（epoch 秒），供「窗口重置倒计时」进度条用
+                    "reset_ts": float(short_term_limit.get("nextResetTime", 0)) / 1000,
+                }
     except (URLError, json.JSONDecodeError, KeyError) as exc:
         print(f"API 错误: {exc}")
 
     return None
+
+
+# ── 番茄钟作息推导 ────────────────────────────────────────────────────
+_workday_cache = {}
+
+
+def _is_workday(day):
+    """中国工作日判定：法定节假日休息、调休周末补班（chinese-calendar 数据）。
+    库缺失 / 日期超出其数据范围时退回「周一~周五」近似，保证可用。"""
+    if day not in _workday_cache:
+        try:
+            from chinese_calendar import is_workday
+            _workday_cache[day] = bool(is_workday(day))
+        except Exception:
+            _workday_cache[day] = day.weekday() < 5
+    return _workday_cache[day]
+
+
+def _off(label, next_time):
+    """非工作时段状态：倒计时区直接显示下次开工时刻（HH:MM 编码进 MM:SS 绘制）"""
+    return {"stage": "off", "label": label,
+            "remaining": next_time.hour * 60 + next_time.minute,
+            "progress": 0, "next_time": next_time.strftime("%H:%M")}
+
+
+def _pomo_state(now=None):
+    """从墙钟时间推导番茄钟状态（对齐 WORK_SESSIONS 作息表）。
+
+    每秒现算而非自由累计计时，因此任意时刻启动即对位、睡眠/挂起后自动恢复，
+    阶段边界永远精确落在作息表的整分上，不随运行时长漂移。时段尾的自然截断
+    （如上午 11:00-11:30 只剩 30 分钟）会收紧该阶段时长，使倒计时递减到 0
+    恰好落在午休/下班边界，不产生突兀跳变。
+
+    返回 dict：
+      stage     "work" / "rest" / "off"（非工作时段）
+      label     显示词：工作/休息，或 off 时的 待机/午休/下班/假日
+      remaining 剩余秒（off 时为下次开工 HH:MM 的编码值）
+      progress  当前阶段进度 0~1（off 恒 0）
+      next_time off 时下一个时段开始时刻 "HH:MM"
+    """
+    now = now or datetime.now()
+    if not _is_workday(now.date()):
+        return _off("假日", dtime(9, 0))
+
+    t = now.time()
+    (am_start, am_end), (pm_start, pm_end) = WORK_SESSIONS
+    if t < am_start:
+        return _off("待机", am_start)
+    if am_end <= t < pm_start:
+        return _off("午休", pm_start)
+    if t >= pm_end:
+        return _off("下班", dtime(9, 0))
+
+    session_start, session_end = (am_start, am_end) if t < am_end else (pm_start, pm_end)
+    to_sec = lambda tt: tt.hour * 3600 + tt.minute * 60 + tt.second
+    session_len = to_sec(session_end) - to_sec(session_start)
+
+    elapsed = (now - datetime.combine(now.date(), session_start)).total_seconds()
+    cycle_sec = (POMODORO_WORK_MIN + POMODORO_REST_MIN) * 60
+    cycle_idx, in_cycle = divmod(elapsed, cycle_sec)
+    if in_cycle < POMODORO_WORK_MIN * 60:
+        stage, stage_total = "work", POMODORO_WORK_MIN * 60
+        stage_offset = cycle_idx * cycle_sec
+    else:
+        stage, stage_total = "rest", POMODORO_REST_MIN * 60
+        stage_offset = cycle_idx * cycle_sec + POMODORO_WORK_MIN * 60
+
+    # 时段尾截断：收尾阶段时长按距时段结束收紧（见 docstring）
+    total = min(stage_total, session_len - stage_offset)
+    remain = total - (elapsed - stage_offset)
+    return {
+        "stage": stage,
+        "label": "工作" if stage == "work" else "休息",
+        "remaining": math.ceil(remain),
+        "progress": 1 - remain / total,
+        "next_time": "",
+    }
 
 
 # ── 通知 ──────────────────────────────────────────────────────────────
@@ -278,6 +447,9 @@ ORANGE = (255, 159, 10, 255)    # iOS systemOrange：15–40%
 RED = (255, 69, 58, 255)        # iOS systemRed：<15%（数字同步染红）
 FOCUS_COLOR = (191, 90, 242, 255)   # Apple 专注紫：工作阶段
 REST_COLOR = (100, 210, 255, 255)   # teal：休息阶段
+OFF_COLOR = (142, 142, 147, 255)    # iOS systemGray：非工作时段（待机/午休/下班/假日）
+YELLOW = (255, 214, 10, 255)        # iOS systemYellow：窗口重置倒计时填充
+WHITE_TRACK = (255, 255, 255, 150)  # 窗口倒计时的亮白轨道（衬托黄填充，空段清晰可读）
 
 NUM_FONT = ("seguisb.ttf",)   # Segoe UI Semibold（数字）
 BOLD_FONT = ("segoeuib.ttf",)  # Segoe UI Bold（TOKEN 标签）
@@ -294,8 +466,12 @@ def _remaining_color(remaining):
 
 
 def _stage_color(stage):
-    """番茄钟阶段色：工作=专注紫、休息=teal（刻意避开电量三色，语义不撞车）"""
-    return REST_COLOR if stage == "rest" else FOCUS_COLOR
+    """番茄钟阶段色：工作=专注紫、休息=teal、非工作时段=灰（刻意避开电量三色）"""
+    if stage == "work":
+        return FOCUS_COLOR
+    if stage == "rest":
+        return REST_COLOR
+    return OFF_COLOR
 
 
 def _draw_tracked(d, cx, y_top, text, font, tracking, fill):
@@ -328,19 +504,20 @@ def _draw_tabular_timer(d, cx, cy, remaining_sec, font, dim):
         x += cell
 
 
-def _draw_capsule(d, cx, y, length, height, frac, color):
+def _draw_capsule(d, cx, y, length, height, frac, color, track=BAR_TRACK):
     """横向细胶囊进度条：轨道 + 按比例填充（iOS 锁屏电量条形态）"""
     x = cx - length / 2
     d.rounded_rectangle([x, y, x + length, y + height],
-                        radius=int(height / 2), fill=BAR_TRACK)
+                        radius=int(height / 2), fill=track)
     if frac > 0.01:
         fill_w = max(length * frac, height)
         d.rounded_rectangle([x, y, x + fill_w, y + height],
                             radius=int(height / 2), fill=color)
 
 
-def create_widget_image(token_remaining, pomo_stage, pomo_remaining_sec, dim):
-    """生成竖版悬浮窗图像：上段 Token%，下段番茄钟（RGBA 逐像素透明圆角）"""
+def create_widget_image(token_remaining, quota_frac, pomo, dim):
+    """生成竖版悬浮窗图像：上段 Token%（含窗口重置倒计时细条），下段番茄钟。
+    pomo 为 _pomo_state() 的返回 dict；off 时倒计时区改显下次开工时刻 HH:MM。"""
     s = SS
     cw, ch = WIDGET_W * s, WIDGET_H * s
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
@@ -374,12 +551,19 @@ def create_widget_image(token_remaining, pomo_stage, pomo_remaining_sec, dim):
     _draw_capsule(d, cx, 74 * s, content_w, 5 * s,
                   remaining / 100, _remaining_color(remaining))
 
+    # 窗口重置倒计时细条（黄填充 = 距重置剩余时间，亮白轨道；满=刚重置回满，
+    # 空=即将重置，用于判断「该冲用量还是该省着用」）
+    reset_bar = YELLOW if not dim else (255, 214, 10, 100)
+    _draw_capsule(d, cx, 84 * s, content_w, 3 * s,
+                  max(0.0, min(1.0, quota_frac)), reset_bar, track=WHITE_TRACK)
+
     # 分隔发丝线（比内容再内缩 8px，不通栏）
     d.line([(22 * s, 95 * s), ((WIDGET_W - 22) * s, 95 * s)], fill=HAIRLINE, width=s)
 
     # ── 下段：阶段点 + 中文阶段词（整组居中）──
-    stage_color = _stage_color(pomo_stage)
-    stage_zh = "休息" if pomo_stage == "rest" else "工作"
+    stage = pomo["stage"]
+    stage_color = _stage_color(stage)
+    stage_zh = pomo["label"]
     zh_font = _load_font(ZH_FONT, 14 * s)
     dot_r = 3 * s
     dot_gap = 6 * s
@@ -394,15 +578,13 @@ def create_widget_image(token_remaining, pomo_stage, pomo_remaining_sec, dim):
            stage_zh, font=zh_font,
            fill=(255, 255, 255, 70 if dim else TEXT_SUB[3]))
 
-    # 倒计时（等宽步进 + 冒号呼吸）
-    _draw_tabular_timer(d, cx, 139 * s, pomo_remaining_sec,
+    # 倒计时（等宽步进 + 冒号呼吸；off 时 remaining 即下次开工 HH:MM 折算秒）
+    _draw_tabular_timer(d, cx, 139 * s, pomo["remaining"],
                         _load_font(NUM_FONT, 20 * s), dim)
 
     # 阶段胶囊进度条（随秒缩减，「活着」的最低调表达）
-    total_sec = (POMODORO_REST_MIN if pomo_stage == "rest" else POMODORO_WORK_MIN) * 60
-    frac = max(0, min(1, pomo_remaining_sec / total_sec))
     bar_color = (255, 255, 255, 60) if dim else stage_color
-    _draw_capsule(d, cx, 160 * s, content_w, 5 * s, frac, bar_color)
+    _draw_capsule(d, cx, 160 * s, content_w, 5 * s, pomo["progress"], bar_color)
 
     return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
 
@@ -504,10 +686,11 @@ class GLMWidget:
         self.root.bind("<B1-Motion>", self._drag_move)
         self._drag_x = self._drag_y = 0
 
-        # 状态：Token 剩余 + 番茄钟
+        # 状态：Token 剩余 + 短期窗口重置点 + 番茄钟（阶段由墙钟推导，见 _pomo_state）
         self._token_remaining = 100  # 加载态显示满电，API 返回后更新
-        self._pomo_stage = "work"
-        self._pomo_remaining = POMODORO_WORK_MIN * 60
+        self._quota_reset_ts = 0.0   # 短期窗口重置时刻（epoch 秒），0 = 尚无数据
+        self._quota_span = 5 * 3600  # 窗口满刻度：初始按 5h，每次拉取按实际跨度上调
+        self._pomo = _pomo_state()
         self._dim = False  # 番茄钟闪烁（灭）标志
 
         # 显示初始状态
@@ -543,37 +726,59 @@ class GLMWidget:
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
 
-    # 统一渲染（Token + 番茄钟）------------------------------------
+    # 统一渲染（Token + 窗口重置 + 番茄钟）--------------------------
     def _render(self):
+        quota_frac = self._quota_reset_frac()
         img = create_widget_image(
-            self._token_remaining, self._pomo_stage, self._pomo_remaining, self._dim
+            self._token_remaining, quota_frac, self._pomo, self._dim
         )
         _update_layered_window(self._hwnd, img)
-        stage_zh = "工作" if self._pomo_stage == "work" else "休息"
-        m, s = divmod(max(0, self._pomo_remaining), 60)
+        p = self._pomo
+        if p["stage"] == "off":
+            detail = f"{p['label']}，下次开工 {p['next_time']}"
+        else:
+            m, s = divmod(max(0, p["remaining"]), 60)
+            detail = f"{p['label']} {m:02d}:{s:02d}"
+        reset = ""
+        if self._quota_reset_ts:
+            left = max(0, self._quota_reset_ts - time.time())
+            h, rem = divmod(int(left), 3600)
+            reset = f" | 窗口 {h}h{rem // 60:02d}m 后重置"
         self.root.tooltip_text = (
-            f"GLM Token 剩余: {self._token_remaining:.0f}% | 番茄钟 {stage_zh} {m:02d}:{s:02d}"
+            f"GLM Token 剩余: {self._token_remaining:.0f}%{reset} | 番茄钟 {detail}"
         )
+
+    def _quota_reset_frac(self):
+        """短期窗口重置倒计时的剩余比例（满 = 刚重置，空 = 即将重置回满）"""
+        if not self._quota_reset_ts:
+            return 0
+        left = self._quota_reset_ts - time.time()
+        return max(0.0, min(1.0, left / self._quota_span))
 
     # 番茄钟 -------------------------------------------------------
     def _pomo_tick(self):
-        """每秒推进倒计时，归零时切换阶段并通知/闪烁"""
-        self._pomo_remaining -= 1
-        if self._pomo_remaining < 0:
-            self._switch_stage()
+        """每秒从墙钟推导番茄钟状态；阶段跃迁（工作↔休息、时段开关）时通知+闪烁"""
+        old, self._pomo = self._pomo, _pomo_state()
+        if old["stage"] != self._pomo["stage"]:
+            self._on_stage_edge(old, self._pomo)
+            self._start_blink()
         self._render()
         self.root.after(1000, self._pomo_tick)
 
-    def _switch_stage(self):
-        if self._pomo_stage == "work":
-            notify_windows("休息时间到", "50 分钟工作完成，休息 10 分钟～放松一下！")
-            self._pomo_stage = "rest"
-            self._pomo_remaining = POMODORO_REST_MIN * 60
-        else:
-            notify_windows("工作时间到", "休息结束，开始下一个 50 分钟工作周期！")
-            self._pomo_stage = "work"
-            self._pomo_remaining = POMODORO_WORK_MIN * 60
-        self._start_blink()
+    def _on_stage_edge(self, old, new):
+        """阶段跃迁沿的通知分发（每条沿只触发一次，启动首帧不通知）"""
+        if old["stage"] == "work" and new["stage"] == "rest":
+            notify_windows("休息时间到", "45 分钟工作完成，休息 15 分钟～放松一下！")
+        elif old["stage"] == "rest" and new["stage"] == "work":
+            notify_windows("工作时间到", "休息结束，开始下一个 45 分钟工作周期！")
+        elif new["stage"] == "work":  # 非工作时段 → 工作：上/下午开工
+            part = "上午" if datetime.now().hour < 12 else "下午"
+            notify_windows(f"{part}开工", f"{part}工作时段开始，45 分钟工作周期启动！")
+        elif new["stage"] == "off":  # 工作 → 非工作时段：午休 / 下班
+            if new["label"] == "午休":
+                notify_windows("上午结束", "午休时间，13:30 继续～")
+            elif new["label"] == "下班":
+                notify_windows("今日工作结束", "下班啦，明天 9:00 见！")
 
     def _start_blink(self):
         self._blink_left = 12  # 12 × 0.5s = 6 秒闪烁
@@ -593,8 +798,17 @@ class GLMWidget:
     def _do_refresh(self):
         def _fetch():
             result = fetch_usage()
-            pct = result["percentage"] if result else 0
-            self._token_remaining = max(0, 100 - pct)
+            if result:
+                pct = result["percentage"]
+                self._token_remaining = max(0, 100 - pct)
+                reset_ts = result.get("reset_ts", 0)
+                if reset_ts:
+                    self._quota_reset_ts = reset_ts
+                    # 满刻度校准：同一窗口内跨度只会递减，取历史最大即窗口刚重置后的值；
+                    # 窗口重置后跨度重新变大，max 自然跟上，无需状态机
+                    span = reset_ts - time.time()
+                    if span > 0:
+                        self._quota_span = max(self._quota_span, span)
             self.root.after(0, self._render)
 
         threading.Thread(target=_fetch, daemon=True).start()

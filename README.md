@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.14
+# GLM Plan Dashboard v1.17
 
 GLM 套餐用量悬浮小组件 + 番茄工作闹钟，Apple 风格竖版卡片贴靠屏幕右缘竖直居中：上段显示 Token 剩余量，下段显示番茄钟倒计时。
 
@@ -7,12 +7,15 @@ GLM 套餐用量悬浮小组件 + 番茄工作闹钟，Apple 风格竖版卡片�
 **Token 用量（上段）**
 - 「TOKEN」14px 粗体标签 + 大号剩余百分比数字 + 5px 胶囊进度条
 - 颜色随余量变化（iOS 系统色）：绿色（≥40%）→ 橙色（15%-40%）→ 红色（<15%，数字与 `%` 单位同步染红）
+- 剩余条下方新增 3px 细条：**短期额度窗口重置倒计时**（黄色填充 = 距重置剩余时间，亮白轨道；满=刚重置回满，空=即将重置），用于判断该冲用量还是省着用；满刻度按 5h 起步、随每次拉取自动校准，tooltip 显示「窗口 XhXXm 后重置」
 - 每 5 分钟自动刷新数据
 
 **番茄工作闹钟（下段）**
-- 50 分钟工作 ↔ 10 分钟休息（每周期 1 小时），自动循环
-- 阶段圆点（工作=专注紫 / 休息=teal）+ 粗体阶段词 + 等宽倒计时（冒号每秒呼吸）+ 5px 胶囊进度条
-- 阶段结束时弹出 Windows 通知（番茄图标 + 应用名「GLM 仪表盘」），倒计时区域闪烁
+- 锚定作息表：工作日 9:00–11:30、13:30–18:00 两个时段内连续跑「45 分钟工作 ↔ 15 分钟休息」；时段尾自然截断（上午 11:00–11:30、下午 17:30–18:00 为 30 分钟收尾工作段，倒计时递减到 0 正好落在午休/下班边界）
+- 节假日 / 调休自适应：chinese-calendar 判定中国法定节假日与周末补班，调休补班的周末照常计时，假期显示「假日」不计时；库缺失或数据超范围时退回「周一~周五」近似
+- 状态由墙钟每秒推导（非累计计时）：任意时刻启动即对位、睡眠/挂起后自动恢复、阶段边界不随运行时长漂移
+- 时段外显示「待机 / 午休 / 下班 / 假日」+ 下次开工时刻；阶段切换、上/下午开工、午休、下班均弹 Windows 通知并闪烁提示
+- 阶段圆点（工作=专注紫 / 休息=teal / 非工作=灰）+ 粗体阶段词 + 等宽倒计时（冒号每秒呼吸）+ 5px 胶囊进度条
 
 **通用**
 - 右键菜单：立即刷新 / 退出
@@ -27,24 +30,41 @@ GLM 套餐用量悬浮小组件 + 番茄工作闹钟，Apple 风格竖版卡片�
 - **图像**: Pillow（PIL）绘制电池图标与番茄图标，支持圆角和抗锯齿
 - **番茄钟**: `root.after` 每秒驱动倒计时状态机
 - **通知**: winotify（WinRT toast）+ 注册表注册应用 AUMID，显示番茄图标与应用名
-- **API**: 通过 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 环境变量或 `~/.claude/settings.json` 读取配置，调用 GLM 配额接口获取用量
+- **API**: 优先实时读取 ZCode 配置（`~/.zcode/cli/config.json` 当前供应商 + `~/.zcode/v2/config.json` 的 apiKey/baseURL），调用 GLM 配额接口获取用量；详见下方「API 配置来源」
 - **刷新**: 后台线程请求 API，主线程更新 UI，5 分钟轮询
 
 ## 安装与运行
 
 ```bash
 pip install -r requirements.txt
-python setup_config.py     # 一次性：把当前 API 配置固化到项目 config.json（脱离 cc）
 python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 ```
 
-**脱离 Claude Code 独立运行**：仪表盘默认从 `~/.claude/settings.json` 读配置；运行 `setup_config.py` 会把配置复制到项目内 `config.json`（已被 `.gitignore` 忽略，不会上传 token），之后即便卸载 cc、更换 cc 配置也能正常运行。
+**API 配置来源（优先级从高到低）**：
 
-> **刷新 token**：换号或 token 过期后，直接重跑 `python setup_config.py` 即可——它会跳过项目内已有的 `config.json`，从 `~/.claude/settings.json`（或环境变量）读取最新配置并写入 `config.json`（v1.11 起）。当然也支持直接手动编辑 `config.json`。
+1. **ZCode 当前配置（默认生效，自动跟随更新）**：`~/.zcode/cli/config.json` 的 `model.providerId` 记录 ZCode 当前选中的供应商，其 `apiKey` / `baseURL` 明文存于 `~/.zcode/v2/config.json` 的 `provider[<id>].options`。仪表盘每次刷新（5 分钟）都现读这两个文件，**在 ZCode 里换 key、换供应商后无需任何手动操作**，最迟一个刷新周期自动生效。若活动供应商无可用 key（如切换到 OAuth 类套餐），自动改用配置中任一已启用且带 key 的供应商。
+2. **项目 `config.json`**（已被 `.gitignore` 忽略，不会上传 key）：ZCode 不可用时的独立兜底，由 `setup_config.py` 固化。
+3. **环境变量** `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`。
+4. **`~/.claude/settings.json`** 的 `env` 字段（兼容 Claude Code）。
+
+> **刷新兜底 key**：兜底 `config.json` 里的 key 过期后，重跑 `python setup_config.py` 即可——它会跳过已有 `config.json`，从 ZCode / 环境变量 / `~/.claude/settings.json` 读取最新配置写入。
 
 **开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
 ## 更新日志
+
+### v1.17
+- **新增短期额度窗口重置倒计时进度条**：Token 剩余胶囊条正下方加 3px 细条，显示最先重置的 TOKENS_LIMIT 窗口距重置（额度回满）的剩余比例——黄色（iOS systemYellow）填充 + 亮白轨道，满=刚重置、空=即将重置，配合剩余量判断「趁重置前冲掉剩余额度 / 等回满再爆量」。满刻度按 5 小时起步，每次拉取用实际跨度动态上调校准；`fetch_usage` 相应返回 `reset_ts`，tooltip 增加「窗口 XhXXm 后重置」
+- **用量请求加固（SSRF 防护）**：新增 `_validated_usage_url()`——仅允许 https + 平台白名单域名，DNS 解析后逐 IP 阻断私网/环回/链路本地/保留地址；禁用 HTTP 重定向跟随（`_NoRedirect`）；拉取失败时保持上次读数不再误显满电
+
+### v1.16
+- **番茄钟锚定工作作息表**：由「任意时刻启动的自由 50/10 循环」改为按工作日 9:00–11:30、13:30–18:00 两个时段跑 45 分钟工作 + 15 分钟休息；状态每秒从墙钟推导（`_pomo_state()`），启动即对位、睡眠恢复不漂移。时段尾自然截断成 30 分钟收尾工作段，倒计时归零恰落在午休/下班边界
+- **节假日/调休自适应**：新增 `chinese-calendar` 依赖，`_is_workday()` 判定法定节假日与周末补班（每年国务院安排），补班周六/日照常计时，假期显示「假日」；缺库或数据超范围退回周一~周五
+- **时段外状态**：显示「待机（9:00 前）/ 午休（11:30–13:30）/ 下班（18:00 后）/ 假日」+ 下次开工时刻；开工、午休、下班、阶段切换均弹通知并闪烁；非工作时段阶段点用 iOS systemGray
+- 通知文案随新节奏更新（45/15、上/下午开工、午休/下班）
+
+### v1.15
+- **API 配置与 ZCode 保持一致并自动跟随**：配置读取最高优先级为 ZCode 来源——`~/.zcode/cli/config.json` 的 `model.providerId` 定位当前供应商，`~/.zcode/v2/config.json` 的 `provider[<id>].options` 取 `apiKey` / `baseURL`。每次刷新（5 分钟）现读文件，ZCode 里换 key / 换供应商后无需任何手动同步。活动供应商无可用 key（如 OAuth 类套餐）时自动改用任一已启用且带 key 的供应商；ZCode 配置缺失时依次落回项目 `config.json` > 环境变量 > `~/.claude/settings.json`（v1.9 层级整体后移一位）。`setup_config.py` 同步更新为固化 ZCode 当前配置作兜底。
 
 ### v1.14
 - **视觉层级微调**：`TOKEN` 标签由 10px 提升为 14px 粗体，与「工作 / 休息」阶段词同级；字距收窄为 1px，保留窄卡片的左右留白
