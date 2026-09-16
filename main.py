@@ -541,7 +541,8 @@ def _draw_vertical_capsule(d, x, y, width, height, frac, color, track=BAR_TRACK)
                             radius=int(width / 2), fill=color)
 
 
-def create_widget_image(token_remaining, quota_frac, weekly_remaining, pomo, dim):
+def create_widget_image(token_remaining, quota_frac, weekly_remaining, pomo, dim,
+                        quota_pulse=0.0):
     """生成竖版悬浮窗图像：短期 Token%、周用量竖条与番茄钟。
     pomo 为 _pomo_state() 的返回 dict；off 时倒计时区改显下次开工时刻 HH:MM。"""
     s = SS
@@ -583,8 +584,14 @@ def create_widget_image(token_remaining, quota_frac, weekly_remaining, pomo, dim
                   remaining / 100, _remaining_color(remaining))
 
     # 窗口重置倒计时细条（黄填充 = 距重置剩余时间，亮白轨道；满=刚重置回满，
-    # 空=即将重置，用于判断「该冲用量还是该省着用」）
+    # 空=即将重置，用于判断「该冲用量还是该省着用」）。整分心跳：5h 满刻度摊在
+    # 56px 条宽上每分钟只收缩 0.2px（约 5 分钟才挪 1 像素），位移肉眼不可见，
+    # 改让填充色每分钟向白闪一下再渐回（quota_pulse 1→0），以节律传达倒计时在走。
     reset_bar = YELLOW if not dim else (255, 214, 10, 100)
+    if quota_pulse > 0 and not dim:
+        reset_bar = tuple(
+            int(c + (255 - c) * 0.6 * quota_pulse) for c in reset_bar[:3]
+        ) + (reset_bar[3],)
     _draw_capsule(d, cx, 84 * s, content_w, 3 * s,
                   max(0.0, min(1.0, quota_frac)), reset_bar, track=WHITE_TRACK)
 
@@ -762,7 +769,8 @@ class GLMWidget:
     def _render(self):
         quota_frac = self._quota_reset_frac()
         img = create_widget_image(
-            self._token_remaining, quota_frac, self._weekly_remaining, self._pomo, self._dim
+            self._token_remaining, quota_frac, self._weekly_remaining, self._pomo,
+            self._dim, self._quota_pulse(),
         )
         _update_layered_window(self._hwnd, img)
         p = self._pomo
@@ -787,6 +795,15 @@ class GLMWidget:
             return 0
         left = self._quota_reset_ts - time.time()
         return max(0.0, min(1.0, left / self._quota_span))
+
+    def _quota_pulse(self):
+        """黄条整分心跳幅度（1→0）：每分钟第 0 秒达峰、6 秒内线性衰减到 0。
+
+        5h 满刻度的位移每分钟仅 0.2px 不可见，用颜色节律代替位移传达「在走」；
+        无重置数据（黄条为空轨道）时不跳。番茄钟闪烁（dim）期间不叠加。"""
+        if not self._quota_reset_ts:
+            return 0
+        return max(0.0, 1 - datetime.now().second / 6)
 
     # 番茄钟 -------------------------------------------------------
     def _pomo_tick(self):
