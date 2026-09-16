@@ -223,7 +223,7 @@ def _validated_usage_url(base_domain):
 
 
 def fetch_usage():
-    """调用已配置 API 获取短期 Token 用量百分比，返回 dict 或 None。
+    """调用已配置 API 获取短期与周 Token 用量百分比，返回 dict 或 None。
 
     调用方式（域名解析 / 请求头 / 平台识别）对齐 cc cli 的 query-usage.mjs：
     从 ANTHROPIC_BASE_URL 取 scheme://host 作为 base_domain，校验为已知 GLM 平台后，
@@ -258,14 +258,30 @@ def fetch_usage():
                 if item.get("type") == "TOKENS_LIMIT"
             ]
             if token_limits:
-                short_term_limit = min(
-                    token_limits,
-                    key=lambda item: item.get("nextResetTime", float("inf")),
+                # unit=3 是 5 小时短期窗口，unit=6 是周窗口。不要用重置时间推断：
+                # 短期窗口未启用时接口可能省略 nextResetTime。
+                short_term_limit = next(
+                    (item for item in token_limits if item.get("unit") == 3), None
                 )
+                weekly_limit = next(
+                    (item for item in token_limits if item.get("unit") == 6), None
+                )
+                if not short_term_limit and not weekly_limit:
+                    return None
                 return {
-                    "percentage": float(short_term_limit.get("percentage", 0)),
-                    # 最先重置窗口的重置点（epoch 秒），供「窗口重置倒计时」进度条用
-                    "reset_ts": float(short_term_limit.get("nextResetTime", 0)) / 1000,
+                    "short_term_percentage": (
+                        float(short_term_limit.get("percentage", 0))
+                        if short_term_limit else None
+                    ),
+                    # 短期窗口的重置点（epoch 秒），供黄色倒计时条使用。
+                    "short_term_reset_ts": (
+                        float(short_term_limit.get("nextResetTime") or 0) / 1000
+                        if short_term_limit else 0
+                    ),
+                    "weekly_percentage": (
+                        float(weekly_limit.get("percentage", 0))
+                        if weekly_limit else None
+                    ),
                 }
     except (URLError, json.JSONDecodeError, KeyError) as exc:
         print(f"API 错误: {exc}")
@@ -515,8 +531,18 @@ def _draw_capsule(d, cx, y, length, height, frac, color, track=BAR_TRACK):
                             radius=int(height / 2), fill=color)
 
 
-def create_widget_image(token_remaining, quota_frac, pomo, dim):
-    """生成竖版悬浮窗图像：上段 Token%（含窗口重置倒计时细条），下段番茄钟。
+def _draw_vertical_capsule(d, x, y, width, height, frac, color, track=BAR_TRACK):
+    """竖向细胶囊进度条：填充自下向上，用于弱化呈现周额度已用比例。"""
+    d.rounded_rectangle([x, y, x + width, y + height],
+                        radius=int(width / 2), fill=track)
+    if frac > 0.01:
+        fill_h = max(height * frac, width)
+        d.rounded_rectangle([x, y + height - fill_h, x + width, y + height],
+                            radius=int(width / 2), fill=color)
+
+
+def create_widget_image(token_remaining, quota_frac, weekly_remaining, pomo, dim):
+    """生成竖版悬浮窗图像：短期 Token%、周用量竖条与番茄钟。
     pomo 为 _pomo_state() 的返回 dict；off 时倒计时区改显下次开工时刻 HH:MM。"""
     s = SS
     cw, ch = WIDGET_W * s, WIDGET_H * s
@@ -529,6 +555,11 @@ def create_widget_image(token_remaining, quota_frac, pomo, dim):
     d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=28 * s, fill=CARD_BG,
                         outline=HAIRLINE, width=2)
     d.line([(24 * s, 2 * s), ((WIDGET_W - 24) * s, 2 * s)], fill=TOP_LIGHT, width=s)
+
+    # 右侧周额度：红色底部锚定，剩余量下降时上沿从上向下收缩。
+    weekly_remaining = min(max(weekly_remaining, 0), 100)
+    _draw_vertical_capsule(d, (WIDGET_W - 11) * s, 18 * s, 4 * s, 68 * s,
+                           weekly_remaining / 100, RED)
 
     # ── 上段：TOKEN 标签 + 剩余大数字 ──
     _draw_tracked(d, cx, 18 * s, "TOKEN", _load_font(BOLD_FONT, 14 * s),
@@ -686,8 +717,9 @@ class GLMWidget:
         self.root.bind("<B1-Motion>", self._drag_move)
         self._drag_x = self._drag_y = 0
 
-        # 状态：Token 剩余 + 短期窗口重置点 + 番茄钟（阶段由墙钟推导，见 _pomo_state）
+        # 状态：短期 Token 剩余 + 周额度剩余 + 短期窗口重置点 + 番茄钟
         self._token_remaining = 100  # 加载态显示满电，API 返回后更新
+        self._weekly_remaining = 100.0  # 周额度剩余比例，右侧红色竖条
         self._quota_reset_ts = 0.0   # 短期窗口重置时刻（epoch 秒），0 = 尚无数据
         self._quota_span = 5 * 3600  # 窗口满刻度：初始按 5h，每次拉取按实际跨度上调
         self._pomo = _pomo_state()
@@ -730,7 +762,7 @@ class GLMWidget:
     def _render(self):
         quota_frac = self._quota_reset_frac()
         img = create_widget_image(
-            self._token_remaining, quota_frac, self._pomo, self._dim
+            self._token_remaining, quota_frac, self._weekly_remaining, self._pomo, self._dim
         )
         _update_layered_window(self._hwnd, img)
         p = self._pomo
@@ -745,7 +777,8 @@ class GLMWidget:
             h, rem = divmod(int(left), 3600)
             reset = f" | 窗口 {h}h{rem // 60:02d}m 后重置"
         self.root.tooltip_text = (
-            f"GLM Token 剩余: {self._token_remaining:.0f}%{reset} | 番茄钟 {detail}"
+            f"GLM 短期 Token 剩余: {self._token_remaining:.0f}%{reset}"
+            f" | 周额度剩余: {self._weekly_remaining:.0f}% | 番茄钟 {detail}"
         )
 
     def _quota_reset_frac(self):
@@ -799,16 +832,21 @@ class GLMWidget:
         def _fetch():
             result = fetch_usage()
             if result:
-                pct = result["percentage"]
-                self._token_remaining = max(0, 100 - pct)
-                reset_ts = result.get("reset_ts", 0)
-                if reset_ts:
+                short_term_pct = result.get("short_term_percentage")
+                if short_term_pct is not None:
+                    self._token_remaining = min(max(100 - short_term_pct, 0), 100)
+                    reset_ts = result.get("short_term_reset_ts", 0)
                     self._quota_reset_ts = reset_ts
-                    # 满刻度校准：同一窗口内跨度只会递减，取历史最大即窗口刚重置后的值；
-                    # 窗口重置后跨度重新变大，max 自然跟上，无需状态机
-                    span = reset_ts - time.time()
-                    if span > 0:
-                        self._quota_span = max(self._quota_span, span)
+                    if reset_ts:
+                        # 满刻度校准：同一窗口内跨度只会递减，取历史最大即窗口刚重置后的值；
+                        # 窗口重置后跨度重新变大，max 自然跟上，无需状态机。
+                        span = reset_ts - time.time()
+                        if span > 0:
+                            self._quota_span = max(self._quota_span, span)
+
+                weekly_pct = result.get("weekly_percentage")
+                if weekly_pct is not None:
+                    self._weekly_remaining = min(max(100 - weekly_pct, 0), 100)
             self.root.after(0, self._render)
 
         threading.Thread(target=_fetch, daemon=True).start()
