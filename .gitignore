@@ -3,3 +3,4 @@ __pycache__/
 config.json
 dashboard.log
 .mimosa/
+ui_state.json
