@@ -1,7 +1,8 @@
-"""GLM 套餐用量悬浮小组件 + 番茄工作闹钟 — 竖版侧栏贴靠屏幕右缘（Win32 分层窗口）
+"""GLM + Kimi 用量悬浮小组件 + 番茄工作闹钟 — 竖版侧栏贴靠屏幕右缘（Win32 分层窗口）
 
-Apple 风格竖版卡片：上段 Token 剩余百分比 + 胶囊进度条，
-下段番茄钟倒计时（50 分钟工作 ↔ 10 分钟休息，自动循环）+ 细进度条。
+Apple 风格竖版卡片：上段三列用量——TOKEN 竖排标签、GLM 三竖条（短期剩余 /
+5h 窗口重置倒计时 / 周剩余）、KIMI 三竖条（短期剩余 / 5h 窗口重置倒计时 /
+月剩余，读 Kimi Code CLI 本地 daemon）；下段番茄钟倒计时 + 细进度条。
 """
 
 import ctypes
@@ -283,9 +284,95 @@ def fetch_usage():
                         if weekly_limit else None
                     ),
                 }
-    except (URLError, json.JSONDecodeError, KeyError) as exc:
+    except (URLError, OSError, json.JSONDecodeError, KeyError) as exc:
+        # OSError 兜住读响应阶段的裸 TimeoutError / socket 错误
+        #（urlopen 只把连接阶段超时包成 URLError，读阶段不包装）
         print(f"API 错误: {exc}")
 
+    return None
+
+
+# ── Kimi 用量（本地 daemon）────────────────────────────────────────────
+# Kimi Code CLI 常驻一个本地 HTTP 服务（kap-server）：端口动态写在
+# ~/.kimi-code/server/instances/*.json（取心跳最新），鉴权 token 在
+# ~/.kimi-code/server.token。用量端点返回 limit5h / limit7d / monthTotal，
+# 每项含 usedRatio（已用比例 0~1）与 resetAt（ISO-8601 UTC）。
+KIMI_HOME = Path.home() / ".kimi-code"
+KIMI_INSTANCES_DIR = KIMI_HOME / "server" / "instances"
+KIMI_SERVER_TOKEN = KIMI_HOME / "server.token"
+
+
+def _kimi_server_targets():
+    """枚举本地 Kimi daemon 的 (url, token)，按实例心跳新旧排序。"""
+    try:
+        token = KIMI_SERVER_TOKEN.read_text(encoding="utf-8").strip()
+    except OSError:
+        return []
+    if not token:
+        return []
+    instances = []
+    try:
+        for f in KIMI_INSTANCES_DIR.glob("*.json"):
+            try:
+                lock = json.loads(f.read_text(encoding="utf-8"))
+                instances.append(
+                    (lock.get("heartbeat_at", 0), lock.get("host", "127.0.0.1"),
+                     lock.get("port"))
+                )
+            except (json.JSONDecodeError, OSError):
+                continue
+    except OSError:
+        return []
+    targets = []
+    for _, host, port in sorted(instances, reverse=True):
+        if isinstance(port, int) and 0 < port < 65536:
+            targets.append((f"http://{host}:{port}/api/v1/oauth/usage", token))
+    return targets
+
+
+def fetch_kimi_usage():
+    """读取本地 Kimi daemon 的短期窗口用量，返回 dict 或 None。
+
+    daemon 未在跑（Kimi CLI 没启动过 / 已退出）时所有实例都连不上，
+    返回 None，界面按无数据处理（空轨道 + "--"），不伪造读数。
+    """
+    for url, token in _kimi_server_targets():
+        req = Request(url, headers={
+            "Authorization": f"Bearer {token}",
+            "Accept-Language": "en-US,en",
+        })
+        try:
+            with _OPENER.open(req, timeout=3) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except (URLError, OSError, json.JSONDecodeError):
+            continue
+        data = body.get("data") or {}
+        if data.get("kind") != "ok":
+            continue
+        quota = data.get("quota") or {}
+        usages = quota.get("usages") or {}
+        limit5h = usages.get("limit5h") or {}
+        used = limit5h.get("usedRatio")
+        if used is None:
+            continue
+        reset_ts = 0.0
+        reset_at = limit5h.get("resetAt")
+        if reset_at:
+            try:
+                from datetime import timezone
+                reset_ts = datetime.fromisoformat(
+                    reset_at.replace("Z", "+00:00")
+                ).astimezone(timezone.utc).timestamp()
+            except ValueError:
+                reset_ts = 0.0
+        monthly_used = (usages.get("monthTotal") or {}).get("usedRatio")
+        return {
+            "short_term_percentage": float(used) * 100,
+            "short_term_reset_ts": reset_ts,
+            "monthly_percentage": (
+                float(monthly_used) * 100 if monthly_used is not None else None
+            ),
+        }
     return None
 
 
@@ -449,7 +536,7 @@ def _load_font(candidates, size):
 
 
 # ── UI 规格（Apple 风格竖版侧栏，与 cc cli 研讨定稿：iOS 暗色系统色 + 发丝线）──
-WIDGET_W, WIDGET_H = 84, 192    # 最终窗口尺寸（逻辑像素）
+WIDGET_W, WIDGET_H = 140, 192   # 最终窗口尺寸（逻辑像素）；v1.21 加宽容纳三列
 SS = 3                          # 超采样倍率：先画 3 倍大图再 LANCZOS 缩小抗锯齿
 CARD_BG = (28, 28, 30, 190)     # #1C1C1E @75%，iOS secondarySystemBackground(dark)
 HAIRLINE = (255, 255, 255, 26)  # 发丝描边 / 分隔线
@@ -465,7 +552,6 @@ FOCUS_COLOR = (191, 90, 242, 255)   # Apple 专注紫：工作阶段
 REST_COLOR = (100, 210, 255, 255)   # teal：休息阶段
 OFF_COLOR = (142, 142, 147, 255)    # iOS systemGray：非工作时段（待机/午休/下班/假日）
 YELLOW = (255, 214, 10, 255)        # iOS systemYellow：窗口重置倒计时填充
-WHITE_TRACK = (255, 255, 255, 150)  # 窗口倒计时的亮白轨道（衬托黄填充，空段清晰可读）
 
 NUM_FONT = ("seguisb.ttf",)   # Segoe UI Semibold（数字）
 BOLD_FONT = ("segoeuib.ttf",)  # Segoe UI Bold（TOKEN 标签）
@@ -541,64 +627,93 @@ def _draw_vertical_capsule(d, x, y, width, height, frac, color, track=BAR_TRACK)
                             radius=int(width / 2), fill=color)
 
 
-def create_widget_image(token_remaining, quota_frac, weekly_remaining, pomo, dim,
-                        quota_pulse=0.0):
-    """生成竖版悬浮窗图像：短期 Token%、周用量竖条与番茄钟。
-    pomo 为 _pomo_state() 的返回 dict；off 时倒计时区改显下次开工时刻 HH:MM。"""
+def _draw_column_header(d, cx, title, pct, s):
+    """列顶单行小标题 + 短期剩余小数字（如 GLM 99）：无数据时数字显示 --"""
+    title_font = _load_font(BOLD_FONT, 9 * s)
+    num_font = _load_font(NUM_FONT, 11 * s)
+    num = "--" if pct is None else f"{int(pct)}"
+    color = TEXT_DIM if pct is None else (
+        RED if pct < 15 else TEXT_MAIN
+    )
+    tw = title_font.getlength(title)
+    nw = num_font.getlength(num)
+    gap = 3 * s
+    x = cx - (tw + gap + nw) / 2
+    baseline = 25 * s
+    d.text((x, baseline), title, font=title_font, fill=TEXT_SUB, anchor="ls")
+    d.text((x + tw + gap, baseline), num, font=num_font, fill=color, anchor="ls")
+
+
+def _pulse_white(color, pulse):
+    """按脉冲幅度向白色混合填充色（整分心跳用，峰值混 60% 白）"""
+    if pulse <= 0:
+        return color
+    return tuple(int(c + (255 - c) * 0.6 * pulse) for c in color[:3]) + (color[3],)
+
+
+def create_widget_image(glm, kimi, pomo, dim):
+    """生成竖版悬浮窗图像：三列用量（TOKEN 竖排标签 / GLM 三竖条 / KIMI 三竖条）
+    + 番茄钟。glm/kimi 为视图 dict（remaining / reset_frac / pulse，glm 另有 weekly、
+    kimi 另有 monthly），kimi["remaining"] 为 None 表示无数据（daemon 未跑）。"""
     s = SS
     cw, ch = WIDGET_W * s, WIDGET_H * s
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    cx = cw / 2
-    content_w = (WIDGET_W - 2 * 14) * s  # 左右内边距 14 → 内容宽 56
 
     # 深色圆角卡片 + 发丝描边 + 顶部内高光（无真模糊时的伪玻璃补偿）
     d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=28 * s, fill=CARD_BG,
                         outline=HAIRLINE, width=2)
     d.line([(24 * s, 2 * s), ((WIDGET_W - 24) * s, 2 * s)], fill=TOP_LIGHT, width=s)
 
-    # 右侧周额度：红色底部锚定，剩余量下降时上沿从上向下收缩。
-    weekly_remaining = min(max(weekly_remaining, 0), 100)
-    _draw_vertical_capsule(d, (WIDGET_W - 11) * s, 18 * s, 4 * s, 68 * s,
-                           weekly_remaining / 100, RED)
+    bar_top, bar_h, bar_w = 34, 54, 5
 
-    # ── 上段：TOKEN 标签 + 剩余大数字 ──
-    _draw_tracked(d, cx, 18 * s, "TOKEN", _load_font(BOLD_FONT, 14 * s),
-                  int(1 * s), TEXT_SUB)
+    # ── 第一列：TOKEN 竖排标签（纯标识，不承载数据）──
+    tok_font = _load_font(BOLD_FONT, 8 * s)
+    for i, ch_ in enumerate("TOKEN"):
+        bbox = d.textbbox((0, 0), ch_, font=tok_font)
+        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        y = (32 + i * 12) * s
+        d.text((15 * s - w / 2 - bbox[0], y - bbox[1]), ch_,
+               font=tok_font, fill=TEXT_DIM)
 
-    remaining = min(max(token_remaining, 0), 100)
-    num_font = _load_font(NUM_FONT, 26 * s)
-    pct_font = _load_font(NUM_FONT, 13 * s)
-    num = f"{int(remaining)}"
-    num_w = num_font.getlength(num)
-    pct_w = pct_font.getlength("%")
-    gap = 2 * s
-    x = cx - (num_w + gap + pct_w) / 2
-    baseline = 34 * s + num_font.getmetrics()[0]
-    num_color = RED if remaining < 15 else TEXT_MAIN  # 告急时数字同步染红
-    d.text((x, baseline), num, font=num_font, fill=num_color, anchor="ls")
-    d.text((x + num_w + gap, baseline), "%", font=pct_font,
-           fill=num_color[:3] + (170,), anchor="ls")
+    # 列间竖发丝线（TOKEN 标签列与数据列分组）
+    d.line([(26 * s, 22 * s), (26 * s, 90 * s)], fill=HAIRLINE, width=s)
 
-    _draw_capsule(d, cx, 74 * s, content_w, 5 * s,
-                  remaining / 100, _remaining_color(remaining))
+    # ── 第二列：GLM 三竖条（短期剩余 / 5h 重置倒计时 / 周剩余）──
+    _draw_column_header(d, 56 * s, "GLM", glm["remaining"], s)
+    glm_remaining = min(max(glm["remaining"], 0), 100)
+    bar_x = [48, 56, 64]
+    for x, (frac, color) in zip(bar_x, (
+        (glm_remaining / 100, _remaining_color(glm_remaining)),
+        (glm["reset_frac"], _pulse_white(YELLOW, 0 if dim else glm["pulse"])),
+        (min(max(glm["weekly"], 0), 100) / 100, RED),
+    )):
+        _draw_vertical_capsule(d, (x - bar_w / 2) * s, bar_top * s,
+                               bar_w * s, bar_h * s,
+                               max(0.0, min(1.0, frac)), color)
 
-    # 窗口重置倒计时细条（黄填充 = 距重置剩余时间，亮白轨道；满=刚重置回满，
-    # 空=即将重置，用于判断「该冲用量还是该省着用」）。整分心跳：5h 满刻度摊在
-    # 56px 条宽上每分钟只收缩 0.2px（约 5 分钟才挪 1 像素），位移肉眼不可见，
-    # 改让填充色每分钟向白闪一下再渐回（quota_pulse 1→0），以节律传达倒计时在走。
-    reset_bar = YELLOW if not dim else (255, 214, 10, 100)
-    if quota_pulse > 0 and not dim:
-        reset_bar = tuple(
-            int(c + (255 - c) * 0.6 * quota_pulse) for c in reset_bar[:3]
-        ) + (reset_bar[3],)
-    _draw_capsule(d, cx, 84 * s, content_w, 3 * s,
-                  max(0.0, min(1.0, quota_frac)), reset_bar, track=WHITE_TRACK)
+    # ── 第三列：KIMI 三竖条（短期剩余 / 5h 重置倒计时 / 月剩余）──
+    _draw_column_header(d, 110 * s, "KIMI", kimi["remaining"], s)
+    if kimi["remaining"] is None:
+        kimi_bars = ((0.0, OFF_COLOR), (0.0, OFF_COLOR), (0.0, OFF_COLOR))
+    else:
+        kimi_remaining = min(max(kimi["remaining"], 0), 100)
+        monthly = kimi.get("monthly")
+        kimi_bars = (
+            (kimi_remaining / 100, _remaining_color(kimi_remaining)),
+            (kimi["reset_frac"], _pulse_white(YELLOW, 0 if dim else kimi["pulse"])),
+            (min(max(monthly, 0), 100) / 100 if monthly is not None else 0.0, RED),
+        )
+    for x, (frac, color) in zip((102, 110, 118), kimi_bars):
+        _draw_vertical_capsule(d, (x - bar_w / 2) * s, bar_top * s,
+                               bar_w * s, bar_h * s,
+                               max(0.0, min(1.0, frac)), color)
 
-    # 分隔发丝线（比内容再内缩 8px，不通栏）
+    # 分隔发丝线（上段用量 / 下段番茄钟）
     d.line([(22 * s, 95 * s), ((WIDGET_W - 22) * s, 95 * s)], fill=HAIRLINE, width=s)
 
     # ── 下段：阶段点 + 中文阶段词（整组居中）──
+    cx = cw / 2
     stage = pomo["stage"]
     stage_color = _stage_color(stage)
     stage_zh = pomo["label"]
@@ -622,7 +737,8 @@ def create_widget_image(token_remaining, quota_frac, weekly_remaining, pomo, dim
 
     # 阶段胶囊进度条（随秒缩减，「活着」的最低调表达）
     bar_color = (255, 255, 255, 60) if dim else stage_color
-    _draw_capsule(d, cx, 160 * s, content_w, 5 * s, pomo["progress"], bar_color)
+    _draw_capsule(d, cx, 160 * s, (WIDGET_W - 2 * 22) * s, 5 * s,
+                  pomo["progress"], bar_color)
 
     return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
 
@@ -724,11 +840,15 @@ class GLMWidget:
         self.root.bind("<B1-Motion>", self._drag_move)
         self._drag_x = self._drag_y = 0
 
-        # 状态：短期 Token 剩余 + 周额度剩余 + 短期窗口重置点 + 番茄钟
+        # 状态：GLM（短期 Token 剩余 + 周额度剩余 + 短期窗口重置点）+ Kimi + 番茄钟
         self._token_remaining = 100  # 加载态显示满电，API 返回后更新
-        self._weekly_remaining = 100.0  # 周额度剩余比例，右侧红色竖条
+        self._weekly_remaining = 100.0  # 周额度剩余比例，GLM 第三竖条
         self._quota_reset_ts = 0.0   # 短期窗口重置时刻（epoch 秒），0 = 尚无数据
         self._quota_span = 5 * 3600  # 窗口满刻度：初始按 5h，每次拉取按实际跨度上调
+        self._kimi_remaining = None  # Kimi 短期剩余；None = 无数据（daemon 未跑）
+        self._kimi_reset_ts = 0.0
+        self._kimi_span = 5 * 3600
+        self._kimi_monthly_remaining = None  # Kimi 月额度剩余；None = 无数据
         self._pomo = _pomo_state()
         self._dim = False  # 番茄钟闪烁（灭）标志
 
@@ -765,13 +885,39 @@ class GLMWidget:
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
 
-    # 统一渲染（Token + 窗口重置 + 番茄钟）--------------------------
+    # 统一渲染（GLM/Kimi 三列 + 番茄钟）--------------------------------
+    @staticmethod
+    def _reset_frac(reset_ts, span):
+        """窗口重置倒计时的剩余比例（满 = 刚重置，空 = 即将重置回满）"""
+        if not reset_ts:
+            return 0
+        left = reset_ts - time.time()
+        return max(0.0, min(1.0, left / span))
+
+    @staticmethod
+    def _reset_pulse(reset_ts):
+        """黄条整分心跳幅度（1→0）：每分钟第 0 秒达峰、6 秒内线性衰减到 0。
+
+        5h 满刻度的位移每分钟仅 0.2px 不可见，用颜色节律代替位移传达「在走」；
+        无重置数据（黄条为空轨道）时不跳。番茄钟闪烁（dim）期间不叠加。"""
+        if not reset_ts:
+            return 0
+        return max(0.0, 1 - datetime.now().second / 6)
+
     def _render(self):
-        quota_frac = self._quota_reset_frac()
-        img = create_widget_image(
-            self._token_remaining, quota_frac, self._weekly_remaining, self._pomo,
-            self._dim, self._quota_pulse(),
-        )
+        glm_view = {
+            "remaining": self._token_remaining,
+            "reset_frac": self._reset_frac(self._quota_reset_ts, self._quota_span),
+            "pulse": self._reset_pulse(self._quota_reset_ts),
+            "weekly": self._weekly_remaining,
+        }
+        kimi_view = {
+            "remaining": self._kimi_remaining,
+            "reset_frac": self._reset_frac(self._kimi_reset_ts, self._kimi_span),
+            "pulse": self._reset_pulse(self._kimi_reset_ts),
+            "monthly": self._kimi_monthly_remaining,
+        }
+        img = create_widget_image(glm_view, kimi_view, self._pomo, self._dim)
         _update_layered_window(self._hwnd, img)
         p = self._pomo
         if p["stage"] == "off":
@@ -779,31 +925,25 @@ class GLMWidget:
         else:
             m, s = divmod(max(0, p["remaining"]), 60)
             detail = f"{p['label']} {m:02d}:{s:02d}"
-        reset = ""
+        parts = [f"GLM 短期剩余: {self._token_remaining:.0f}%"]
         if self._quota_reset_ts:
             left = max(0, self._quota_reset_ts - time.time())
             h, rem = divmod(int(left), 3600)
-            reset = f" | 窗口 {h}h{rem // 60:02d}m 后重置"
-        self.root.tooltip_text = (
-            f"GLM 短期 Token 剩余: {self._token_remaining:.0f}%{reset}"
-            f" | 周额度剩余: {self._weekly_remaining:.0f}% | 番茄钟 {detail}"
-        )
-
-    def _quota_reset_frac(self):
-        """短期窗口重置倒计时的剩余比例（满 = 刚重置，空 = 即将重置回满）"""
-        if not self._quota_reset_ts:
-            return 0
-        left = self._quota_reset_ts - time.time()
-        return max(0.0, min(1.0, left / self._quota_span))
-
-    def _quota_pulse(self):
-        """黄条整分心跳幅度（1→0）：每分钟第 0 秒达峰、6 秒内线性衰减到 0。
-
-        5h 满刻度的位移每分钟仅 0.2px 不可见，用颜色节律代替位移传达「在走」；
-        无重置数据（黄条为空轨道）时不跳。番茄钟闪烁（dim）期间不叠加。"""
-        if not self._quota_reset_ts:
-            return 0
-        return max(0.0, 1 - datetime.now().second / 6)
+            parts[0] += f"（{h}h{rem // 60:02d}m 后重置）"
+        parts.append(f"GLM 周额度剩余: {self._weekly_remaining:.0f}%")
+        if self._kimi_remaining is None:
+            parts.append("Kimi: 无数据（未检测到 Kimi 本地服务）")
+        else:
+            kp = f"Kimi 短期剩余: {self._kimi_remaining:.0f}%"
+            if self._kimi_reset_ts:
+                left = max(0, self._kimi_reset_ts - time.time())
+                h, rem = divmod(int(left), 3600)
+                kp += f"（{h}h{rem // 60:02d}m 后重置）"
+            parts.append(kp)
+            if self._kimi_monthly_remaining is not None:
+                parts.append(f"Kimi 月额度剩余: {self._kimi_monthly_remaining:.0f}%")
+        parts.append(f"番茄钟 {detail}")
+        self.root.tooltip_text = " | ".join(parts)
 
     # 番茄钟 -------------------------------------------------------
     def _pomo_tick(self):
@@ -864,6 +1004,21 @@ class GLMWidget:
                 weekly_pct = result.get("weekly_percentage")
                 if weekly_pct is not None:
                     self._weekly_remaining = min(max(100 - weekly_pct, 0), 100)
+
+            kimi = fetch_kimi_usage()
+            if kimi:
+                self._kimi_remaining = min(
+                    max(100 - kimi["short_term_percentage"], 0), 100)
+                self._kimi_reset_ts = kimi["short_term_reset_ts"]
+                if self._kimi_reset_ts:
+                    span = self._kimi_reset_ts - time.time()
+                    if span > 0:
+                        self._kimi_span = max(self._kimi_span, span)
+                monthly_pct = kimi.get("monthly_percentage")
+                if monthly_pct is not None:
+                    self._kimi_monthly_remaining = min(
+                        max(100 - monthly_pct, 0), 100)
+            # daemon 不在跑时不清空既有读数；从未有过数据则保持 None（空轨道）
             self.root.after(0, self._render)
 
         threading.Thread(target=_fetch, daemon=True).start()
