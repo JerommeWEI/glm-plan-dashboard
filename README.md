@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.22
+# GLM Plan Dashboard v1.24
 
 GLM + Kimi 双源用量悬浮小组件 + 番茄工作闹钟，Acrylic 真毛玻璃竖版卡片贴靠屏幕右缘：上段三列显示双平台用量（TOKEN 竖排标签 / GLM 三竖条 / KIMI 两竖条），下段显示番茄钟倒计时。空闲时自动缩成右缘微光细边，鼠标触及滑出，悬停展开详情面板。
 
@@ -64,6 +64,12 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 **开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
 ## 更新日志
+
+### v1.24
+- **修复贴边隐藏在多屏环境下的两处越界**：① 细边唤出热区右界越出屏缘 8px 落在邻屏左缘上，鼠标在邻屏左缘移动就把卡片拽出再缩回，表现为卡片在两屏间反复弹跳——热区收紧为严格在本屏内（`px < sw`，屏缘内侧 16px 仍可正常唤出）；② 隐藏态漏撤 DWM 圆角偏好，DWM 按窗口矩形（身体伸在邻屏上）描出一圈整卡轮廓线——细边模式切换时同时改 DONOTROUND，邻屏彻底干净，严格只在本屏边缘显示一条竖向番茄进度条
+
+### v1.23
+- 多屏贴边修复：所在屏按可见锚点判定 + 停靠位置记忆（`ui_state.json`）；隐藏改原地缩边（region 裁窄 + 关 Acrylic，邻屏无残影）；悬空带计入热区消除贴边弹跳；DWM 圆角偏好让毛玻璃底真正圆角
 
 ### v1.22
 - **苹果风改版 · 材质**：Win11 Acrylic 真毛玻璃背景（`SetWindowCompositionAttribute` + 暗色 tint），替代 PIL 自绘卡片底；圆角改用 `SetWindowRgn` 裁剪 12px（`DWMWA_WINDOW_CORNER_PREFERENCE` 与分层窗口渲染冲突会致窗口不可见，故弃用）；发丝描边与顶部内高光保留；API 不可用的老系统自动回退 PIL 自绘卡片

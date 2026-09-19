@@ -170,13 +170,13 @@ def _set_round_corners(hwnd, w, h):
     return bool(ok)
 
 
-def _set_dwm_round(hwnd):
-    """DWMWA_WINDOW_CORNER_PREFERENCE=DWMWCP_ROUND：让 DWM 把 Acrylic 模糊底
-    一并裁成圆角——只有它管得到组合属性绘制的玻璃形状（Win11 实测有效，
-    与 UpdateLayeredWindow 分层渲染可共存）"""
-    pref = ctypes.c_int(2)  # DWMWCP_ROUND
+def _set_dwm_round(hwnd, pref=2):
+    """DWMWA_WINDOW_CORNER_PREFERENCE：让 DWM 把 Acrylic 模糊底一并裁成圆角
+    （只有它管得到组合属性绘制的玻璃形状）。pref: 2=DWMWCP_ROUND，
+    1=DWMWCP_DONOTROUND。注意此属性会让 DWM 按窗口矩形描一圈边框——
+    隐藏态窗口身体伸在邻屏上，必须 DONOTROUND，否则邻屏浮出整卡轮廓线"""
     return bool(ctypes.windll.dwmapi.DwmSetWindowAttribute(
-        ctypes.c_void_p(hwnd), 33, ctypes.byref(pref), 4))
+        ctypes.c_void_p(hwnd), 33, ctypes.byref(ctypes.c_int(pref)), 4))
 
 
 # ── 配置 ──────────────────────────────────────────────────────────────
@@ -1244,10 +1244,11 @@ class GLMWidget:
             over_panel = qx <= px <= qx + PANEL_W and y <= py <= y + h
 
         if self._hidden:
-            # 细边状态：指针触及细边（本屏右缘附近）即滑出。右界收紧到
-            # 边缘外 8px——旧版 px >= sw-16 无上界，右侧邻屏坐标恒满足，
-            # 鼠标在邻屏上移动也会把卡片拽出来，造成两屏间来回跳
-            if sw - 16 <= px <= sw + 8 and y - 20 <= py <= y + h + 20:
+            # 细边状态：指针触及细边（本屏右缘附近）即滑出。热区严格限制在
+            # 本屏之内（px < sw）：窗口隐藏时身体伸在右侧邻屏上，若热区越过
+            # 屏缘（旧版 sw+8），鼠标在邻屏左缘移动就会把卡片拽出来再缩回，
+            # 造成卡片在两屏间反复弹跳
+            if sw - 16 <= px < sw and y - 20 <= py <= y + h + 20:
                 self._hidden = False
                 self._sliding_out = True
                 self._slide_to(sw - w - 8, on_done=self._finish_reveal)
@@ -1309,6 +1310,7 @@ class GLMWidget:
                 0, 0, EDGE_STRIP + 1, self._win_h + 1, 6, 6)
             if not user32.SetWindowRgn(ctypes.c_void_p(self._hwnd), rgn, True):
                 gdi32.DeleteObject(rgn)
+            _set_dwm_round(self._hwnd, 1)  # DONOTROUND：撤掉按窗口矩形的描边
             if self._glass:
                 _unset_acrylic(self._hwnd)
         else:
