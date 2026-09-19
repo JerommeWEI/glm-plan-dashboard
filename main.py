@@ -1,9 +1,10 @@
-"""GLM + Kimi + Codex 用量悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨
+"""GLM + Kimi + Codex 用量悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨贴靠屏幕左/右缘
 
 Win11 Acrylic 真毛玻璃状态轨：GLM 深蓝几何晶体、Kimi 绿色星芒、Codex 洋红
 终端符、番茄沙漏四个图标槽位的圆环分别表示两源短期额度、Codex 周预算和
-当前番茄阶段剩余。悬停从左侧展开详情面板，空闲时仍自动缩成右缘 6px 番茄
-进度条。
+当前番茄阶段剩余。拖到任意屏松手就近贴边（左/右缘皆可，跨屏生效），悬停
+从停靠侧对缘展开详情面板，空闲时自动缩成停靠侧 6px 水位式番茄进度条
+（满格齐顶、随剩余时间自上而下回落）。
 """
 
 import ctypes
@@ -45,7 +46,7 @@ ZCODE_CLI_CONFIG_PATH = Path.home() / ".zcode" / "cli" / "config.json"
 ZCODE_PROVIDERS_PATH = Path.home() / ".zcode" / "v2" / "config.json"
 ICON_PATH = Path(__file__).resolve().parent / "tomato.ico"  # AUMID 应用图标
 ICON_PNG = Path(__file__).resolve().parent / "tomato.png"   # toast 内联图标
-UI_STATE_PATH = Path(__file__).resolve().parent / "ui_state.json"  # 停靠位置记忆
+UI_STATE_PATH = Path(__file__).resolve().parent / "ui_state.json"  # 停靠位置与侧别记忆
 AUMID = "GlmDashboard"  # 应用模型 ID（系统通知来源标识）
 
 # 开机自启：写入 HKCU Run 项，登录后用 pythonw 无窗口启动本脚本
@@ -144,7 +145,7 @@ def _set_acrylic(hwnd, r=28, g=28, b=30, a=110):
 def _unset_acrylic(hwnd):
     """关闭组合属性特效（ACCENT_DISABLED）。贴边隐藏时必须调用：
     Acrylic 模糊按窗口 region 生效而非按内容 alpha，隐藏态若保持开启，
-    会在右侧邻屏上浮现一块暗色玻璃矩形。"""
+    会在停靠侧对面的邻屏上浮现一块暗色玻璃矩形。"""
     policy = _ACCENT_POLICY(0, 0, 0, 0)  # ACCENT_DISABLED
     data = _WCA_DATA(
         _WCA_ACCENT_POLICY,
@@ -800,7 +801,7 @@ ZH_WEIGHT = 700
 
 # 贴边隐藏 / 详情面板交互
 EDGE_STRIP = 6      # 贴边隐藏后露出的细边宽度（px）
-HIDE_DELAY = 1.2    # 鼠标离开后多少秒滑入右缘
+HIDE_DELAY = 1.2    # 鼠标离开后多少秒滑入停靠侧屏缘
 PANEL_DELAY = 0.3   # 悬停多少秒展开对应项的详情卡片
 PANEL_SWITCH_DELAY = 0.15
 PANEL_CLOSE_DELAY = 0.3
@@ -1015,22 +1016,26 @@ def create_widget_image(glm, kimi, codex, pomo, dim, glass=False):
     return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
 
 
-def _create_strip_image(progress=0.0):
-    """贴边隐藏时的细边：窗口只露出左侧 EDGE_STRIP 像素（其余在屏外），
-    可见区画一条竖向番茄进度条——顶部锚定、底部边界随剩余时间向上收，
-    像水从底部流走，流到底即空（时间到）。颜色按剩余比例分级：
-    >50% 绿 / 20–50% 黄 / <20% 红，一眼看出还能撑多久。"""
+def _create_strip_image(progress=0.0, side="right"):
+    """贴边隐藏时的细边：窗口只露出停靠侧的 EDGE_STRIP 像素（其余伸在
+    屏外/邻屏，由 region 裁掉），可见区画一条竖向番茄进度条——水位式：
+    满格时水位齐顶，随剩余时间自上而下回落，落到空即时间到。颜色按
+    剩余比例分级：>50% 绿 / 20–50% 黄 / <20% 红，一眼看出还能撑多久。
+    side 为停靠侧："right" 时贴屏右缘、细条画在窗口左侧；"left" 镜像。"""
     s = SS
     img = Image.new("RGBA", (WIDGET_W * s, WIDGET_H * s), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    x0, x1 = 1.5 * s, 4.5 * s
+    if side == "left":
+        x0, x1 = (WIDGET_W - 4.5) * s, (WIDGET_W - 1.5) * s
+    else:
+        x0, x1 = 1.5 * s, 4.5 * s
     y0, y1 = 8 * s, (WIDGET_H - 8) * s
     d.rounded_rectangle([x0, y0, x1, y1], radius=1.5 * s,
                         fill=(255, 255, 255, 36))
     if progress > 0.01:
         color = GREEN if progress > 0.5 else (YELLOW if progress > 0.2 else RED)
         fill_h = max((y1 - y0) * progress, x1 - x0)
-        d.rounded_rectangle([x0, y0, x1, y0 + fill_h], radius=1.5 * s,
+        d.rounded_rectangle([x0, y1 - fill_h, x1, y1], radius=1.5 * s,
                             fill=color[:3] + (220,))
     return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
 
@@ -1168,7 +1173,7 @@ def _update_layered_window(hwnd, img):
 
 
 # ── 多屏显示器感知 ───────────────────────────────────────────────────
-# 贴边停靠/自动隐藏的边沿必须取「窗口当前所在显示器」的右缘，而非主屏宽度：
+# 贴边停靠/自动隐藏的边沿必须取「窗口当前所在显示器」的竖边，而非主屏宽度：
 # 卡片拖到右侧副屏后其坐标普遍大于主屏宽度，若仍按主屏判定，隐藏条件恒真、
 # 滑入目标却落在主屏边缘，卡片会在两块屏之间来回跳（v1.22 及之前的行为）。
 
@@ -1219,10 +1224,10 @@ class GLMWidget:
         self.root.overrideredirect(True)       # 无边框
         self.root.attributes("-topmost", True)  # 置顶
 
-        # 窗口尺寸 & 位置：优先恢复上次停靠位置（ui_state.json，所在屏已拔则丢弃），
-        # 首次启动贴「鼠标所在屏」右缘（悬空 8px、竖直居中），不再写死主屏
+        # 窗口尺寸 & 位置：优先恢复上次停靠位置与侧别（ui_state.json，所在屏
+        # 已拔则丢弃），首次启动贴「鼠标所在屏」右缘（悬空 8px、竖直居中）
         self._win_w, self._win_h = WIDGET_W, WIDGET_H
-        x, y = self._restore_pos()
+        x, y, self._side = self._restore_pos()
         if x is None:
             rect = (monitor_rect_at_point(*self.root.winfo_pointerxy())
                     or (0, 0, self.root.winfo_screenwidth(),
@@ -1252,9 +1257,9 @@ class GLMWidget:
         self._dragging = False
 
         # 贴边隐藏 + hover 详情面板状态
-        self._hidden = False          # 当前是否缩成右缘细边
+        self._hidden = False          # 当前是否缩成停靠侧细边
         self._sliding_out = False     # 细边→整卡滑出动画进行中（期间保持细边视觉）
-        self._visual_mode = None      # 当前窗口形态 "strip"/"full"（幂等切换用）
+        self._visual_mode = None      # 当前窗口形态 ("strip", side)/("full",)（幂等切换用）
         self._panel = None            # 详情面板窗口（lazy 创建）
         self._panel_visible = False
         self._panel_target = None
@@ -1332,24 +1337,41 @@ class GLMWidget:
 
     def _drag_end(self, _event):
         self._dragging = False
+        if self._hidden or self._sliding_out:
+            # 拽着细边拖动后松手：就地恢复整卡视觉并按落点归位，
+            # 否则 6px 细条会悬在屏中间既唤不出也不贴边
+            self._hidden = False
+            self._sliding_out = False
+            self._render()
+        else:
+            # 松手时就近更新停靠侧（决定详情面板展开方向与下次贴哪边）
+            rect = self._monitor_rect()
+            if rect:
+                x = self.root.winfo_x()
+                self._side = ("left"
+                              if x - rect[0] <= rect[2] - (x + self._win_w)
+                              else "right")
         self._save_pos()
 
     def _monitor_rect(self):
-        """卡片所在屏矩形。锚点取窗口左缘内侧而非窗口矩形：隐藏态窗口
-        身体伸在右侧邻屏上，按矩形取「最近屏」会误判成邻屏，边沿判定与
-        滑入目标就全按邻屏右缘算——卡片贴主屏右缘时永远唤不出来的根因"""
+        """卡片所在屏矩形。锚点取停靠侧可见的窗口内缘而非窗口矩形：隐藏态
+        窗口身体伸在停靠侧对面的邻屏上，按矩形取「最近屏」会误判成邻屏，
+        边沿判定与滑入目标就全按邻屏算——卡片贴主屏缘时永远唤不出来的根因。
+        右停靠可见的是窗口左缘（x+3），左停靠镜像取窗口右缘（x+w-3）"""
         x, y = self.root.winfo_x(), self.root.winfo_y()
-        return (monitor_rect_at_point(x + 3, y + self._win_h // 2)
+        anchor_x = x + self._win_w - 3 if self._side == "left" else x + 3
+        return (monitor_rect_at_point(anchor_x, y + self._win_h // 2)
                 or monitor_rect_of_hwnd(self._hwnd))
 
     # 位置记忆 --------------------------------------------------------
     def _save_pos(self):
-        """记住当前停靠位置（隐藏/滑出中态归一为展开位），重启后原位回归"""
+        """记住当前停靠位置与侧别（隐藏/滑出中态归一为展开位），重启后原位回归"""
         x, y = self.root.winfo_x(), self.root.winfo_y()
         if self._hidden or self._sliding_out:
             rect = self._monitor_rect()
             if rect:
-                x = rect[2] - self._win_w - 8
+                x = (rect[0] + 8 if self._side == "left"
+                     else rect[2] - self._win_w - 8)
         try:
             # 固定写项目内 ui_state.json；resolve 后显式断言仍在项目目录，
             # 把「路径由 __file__ 派生、无外部输入」的隐式约束变成运行时保证
@@ -1357,22 +1379,28 @@ class GLMWidget:
             project_dir = Path(__file__).resolve().parent
             if project_dir not in state.parents:
                 raise OSError("状态文件越出项目目录，拒绝写入")
-            state.write_text(json.dumps({"x": x, "y": y}), encoding="utf-8")
+            state.write_text(json.dumps({"x": x, "y": y, "side": self._side}),
+                             encoding="utf-8")
         except OSError:
             pass  # 位置记忆写失败不影响运行
 
     def _restore_pos(self):
-        """读取上次位置；所在屏已不在线（拔掉/改布局）则返回 (None, None) 走默认"""
+        """读取上次位置与停靠侧；所在屏已不在线（拔掉/改布局）则返回
+        (None, None, "right") 走默认。旧版 ui_state.json 没有 side 字段，
+        按右停靠兼容（v1.24 及之前只有右缘贴边）"""
         try:
             with open(UI_STATE_PATH, encoding="utf-8") as f:
                 pos = json.load(f)
             x, y = int(pos["x"]), int(pos["y"])
         except (OSError, KeyError, TypeError, ValueError):
-            return None, None
+            return None, None, "right"
+        side = pos.get("side", "right")
+        if side not in ("left", "right"):
+            side = "right"
         # 用窗口中心点校验：记忆位置必须落在一块当前在线的屏上
         if monitor_rect_at_point(x + self._win_w // 2, y + self._win_h // 2):
-            return x, y
-        return None, None
+            return x, y, side
+        return None, None, "right"
 
     # 贴边隐藏 + hover 详情面板 --------------------------------------
     @staticmethod
@@ -1390,19 +1418,25 @@ class GLMWidget:
         px, py = self.root.winfo_pointerxy()
         x, y = self.root.winfo_x(), self.root.winfo_y()
         w, h = self._win_w, self._win_h
-        # 边沿取「窗口当前所在屏」的右缘：拖到哪块屏就贴哪块屏，不再拽回主屏
+        # 边沿取「窗口当前所在屏」：拖到哪块屏就贴哪块屏，不再拽回主屏
         rect = self._monitor_rect()
         if rect:
-            sw = rect[2]
+            ml, sw = rect[0], rect[2]
         else:  # 查询失败兜底：退回老的主屏判定
-            sw = self.root.winfo_screenwidth()
+            ml, sw = 0, self.root.winfo_screenwidth()
         now = time.time()
 
-        # 停靠右缘时，卡片右界到屏幕边缘之间的 8px 悬空带也算「在卡片上」：
-        # 鼠标贴屏幕右缘悬停（正是唤出卡片的自然位置）恰好落在这条带里，
+        # 就近贴边判定：卡片左/右缘进入本屏对应竖边 24px 内即可停靠；
+        # 两边都够到（屏比卡片宽不了多少）时取更近的一边
+        near_l = x <= ml + 24
+        near_r = x + w >= sw - 24
+
+        # 停靠某侧屏缘时，卡片到该屏缘之间的 8px 悬空带也算「在卡片上」：
+        # 鼠标贴屏幕边缘悬停（正是唤出卡片的自然位置）恰好落在这条带里，
         # 若不算，1.2s 后会被判「离开」缩边、随后又触发滑出，卡片反复弹跳
-        right = sw if x + w >= sw - 24 else x + w
-        over_card = x <= px <= right and y <= py <= y + h
+        left_bound = ml if near_l else x
+        right_bound = sw if near_r else x + w
+        over_card = left_bound <= px <= right_bound and y <= py <= y + h
         over_rail = x <= px <= x + w and y <= py <= y + h
         hover_target = self._slot_at(py - y) if over_rail else None
         over_panel = False
@@ -1411,28 +1445,39 @@ class GLMWidget:
             over_panel = qx <= px <= qx + PANEL_W and qy <= py <= qy + PANEL_H
 
         if self._hidden:
-            # 细边状态：指针触及细边（本屏右缘附近）即滑出。热区严格限制在
-            # 本屏之内（px < sw）：窗口隐藏时身体伸在右侧邻屏上，若热区越过
-            # 屏缘（旧版 sw+8），鼠标在邻屏左缘移动就会把卡片拽出来再缩回，
-            # 造成卡片在两屏间反复弹跳
-            if sw - 16 <= px < sw and y - 20 <= py <= y + h + 20:
+            # 细边状态：指针触及停靠侧屏缘热区（本屏内 16px）即滑出。热区
+            # 严格限制在本屏之内：窗口隐藏时身体伸在对面邻屏上，若热区越过
+            # 屏缘，鼠标在邻屏边缘移动就会把卡片拽出来再缩回，两屏间弹跳。
+            # 拖拽期间不唤出（松手时 _drag_end 统一恢复整卡）
+            if self._side == "left":
+                in_zone = ml <= px < ml + 16
+                reveal_x = ml + 8
+            else:
+                in_zone = sw - 16 <= px < sw
+                reveal_x = sw - w - 8
+            if (in_zone and not self._dragging
+                    and y - 20 <= py <= y + h + 20):
                 self._hidden = False
                 self._sliding_out = True
-                self._slide_to(sw - w - 8, on_done=self._finish_reveal)
+                self._slide_to(reveal_x, on_done=self._finish_reveal)
         elif not self._dragging:
             if over_card or over_panel:
                 self._leave_since = None
             else:
-                # 停靠当前屏右缘即自动隐藏：原地缩成细边（region 裁窄 +
-                # 关 Acrylic），窗口不再越出屏缘，邻屏上无残影
-                if x + w >= sw - 24 and now - self._born > BOOT_GRACE:
+                # 靠近本屏任一竖边即自动隐藏：原地缩成细边（region 裁窄 +
+                # 关 Acrylic），窗口不再越出本屏可见内容，邻屏上无残影
+                if (near_l or near_r) and now - self._born > BOOT_GRACE:
+                    if near_l and (not near_r or x - ml <= sw - (x + w)):
+                        self._side, hide_x = "left", ml - w + EDGE_STRIP
+                    else:
+                        self._side, hide_x = "right", sw - EDGE_STRIP
                     if self._leave_since is None:
                         self._leave_since = now
                     elif now - self._leave_since >= HIDE_DELAY:
                         self._leave_since = None
                         self._hidden = True
                         self._render()  # 先换细边视觉，再滑向边缘
-                        self._slide_to(sw - EDGE_STRIP)
+                        self._slide_to(hide_x)
 
             if hover_target:
                 self._panel_leave_since = None
@@ -1479,18 +1524,20 @@ class GLMWidget:
     # 细边/整卡窗口形态 ------------------------------------------------
     def _apply_visual_mode(self, strip):
         """细边与整卡两种窗口形态切换（按需幂等）：
-        - 细边：region 裁成 EDGE_STRIP 竖条——窗口矩形虽仍为整卡大小，
-          region 外不参与命中测试，伸在邻屏上的透明部分不挡鼠标；
-          同时关 Acrylic（模糊按 region 生效，开着会在邻屏浮出暗色玻璃块）
+        - 细边：region 裁出停靠侧的 EDGE_STRIP 竖条（右停靠裁左缘、
+          左停靠裁右缘）——窗口矩形虽仍为整卡大小，region 外不参与命中
+          测试，伸在邻屏上的透明部分不挡鼠标；同时关 Acrylic（模糊按
+          region 生效，开着会在邻屏浮出暗色玻璃块）
         - 整卡：清除硬 region，交给分层位图的 alpha 边缘抗锯齿"""
-        mode = "strip" if strip else "full"
+        mode = ("strip", self._side) if strip else ("full",)
         if mode == self._visual_mode:
             return
         self._visual_mode = mode
         user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
         if strip:
+            rgn_x = 0 if self._side == "right" else self._win_w - EDGE_STRIP
             rgn = gdi32.CreateRoundRectRgn(
-                0, 0, EDGE_STRIP + 1, self._win_h + 1, 6, 6)
+                rgn_x, 0, rgn_x + EDGE_STRIP + 1, self._win_h + 1, 6, 6)
             if not user32.SetWindowRgn(ctypes.c_void_p(self._hwnd), rgn, True):
                 gdi32.DeleteObject(rgn)
             _set_dwm_round(self._hwnd, 1)  # DONOTROUND：撤掉按窗口矩形的描边
@@ -1534,14 +1581,21 @@ class GLMWidget:
         p.withdraw()
 
     def _panel_position(self, target):
-        """将局部详情卡片对齐至对应图标，并限制在当前屏幕可见区。"""
+        """将局部详情卡片对齐至对应图标，并限制在当前屏幕可见区。
+        展开方向随停靠侧镜像：右停靠默认从卡片左缘展开，左停靠默认右缘；
+        默认侧放不下时回退到另一侧。"""
         card_x, card_y = self.root.winfo_x(), self.root.winfo_y()
         rect = self._monitor_rect()
         if not rect:
             rect = (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
-        target_x = card_x - PANEL_W - PANEL_GAP
-        if target_x < rect[0] + PANEL_GAP:
+        if self._side == "left":
             target_x = card_x + self._win_w + PANEL_GAP
+            if target_x + PANEL_W > rect[2] - PANEL_GAP:
+                target_x = card_x - PANEL_W - PANEL_GAP
+        else:
+            target_x = card_x - PANEL_W - PANEL_GAP
+            if target_x < rect[0] + PANEL_GAP:
+                target_x = card_x + self._win_w + PANEL_GAP
         target_y = card_y + SLOT_CENTERS[SLOT_KEYS.index(target)] - PANEL_H // 2
         target_x = max(rect[0] + PANEL_GAP, min(target_x, rect[2] - PANEL_W - PANEL_GAP))
         target_y = max(rect[1] + PANEL_GAP, min(target_y, rect[3] - PANEL_H - PANEL_GAP))
@@ -1560,7 +1614,11 @@ class GLMWidget:
             p.geometry(f"+{target_x}+{target_y}")
             return
 
-        start_x = self.root.winfo_x() - 18
+        # 起点藏在卡片背后（右停靠偏左、左停靠镜像偏右），滑出时像是
+        # 从卡片背后长出来
+        card_x = self.root.winfo_x()
+        start_x = (card_x + self._win_w + 18 - PANEL_W
+                   if self._side == "left" else card_x - 18)
         p.geometry(f"+{start_x}+{target_y}")
         p.deiconify()
         # 面板压到主卡片之下，滑出时不遮挡卡片
@@ -1633,7 +1691,7 @@ class GLMWidget:
                           if self._codex_remaining is not None else None),
         }
         if self._hidden or self._sliding_out:
-            img = _create_strip_image(self._pomo["progress"])
+            img = _create_strip_image(self._pomo["progress"], side=self._side)
         else:
             img = create_widget_image(glm_view, kimi_view, codex_view,
                                       self._pomo, self._dim, glass=self._glass)
