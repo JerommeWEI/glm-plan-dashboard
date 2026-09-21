@@ -1,8 +1,9 @@
-"""GLM + Kimi 用量悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨
+"""GLM + Kimi + Codex 用量悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨
 
-Win11 Acrylic 真毛玻璃状态轨：GLM 深蓝几何晶体、Kimi 绿色星芒、番茄沙漏
-三个图标槽位的圆环分别表示短期额度和当前番茄阶段剩余。悬停从左侧展开
-详情面板，空闲时仍自动缩成右缘 6px 番茄进度条。
+Win11 Acrylic 真毛玻璃状态轨：GLM 深蓝几何晶体、Kimi 绿色星芒、Codex 洋红
+终端符、番茄沙漏四个图标槽位的圆环分别表示两源短期额度、Codex 周预算和
+当前番茄阶段剩余。悬停从左侧展开详情面板，空闲时仍自动缩成右缘 6px 番茄
+进度条。
 """
 
 import ctypes
@@ -459,6 +460,136 @@ def fetch_kimi_usage():
     return None
 
 
+# ── Codex 用量（第三方中转的 GPT 订阅）────────────────────────────────
+# Codex CLI 经 UAPI 网关中转：base_url 在 ~/.codex/config.toml 的
+# [model_providers.<model_provider>].base_url（供应商名跟顶层 model_provider 走，
+# 不写死 "OpenAI"），key 在 ~/.codex/auth.json 的 OPENAI_API_KEY（Bearer 鉴权——
+# 与 GLM 的裸 token 头不同，勿复用）。GET {base}/v1/usage 返回
+# subscription{weekly/monthly_limit_usd, weekly_usage_usd, weekly_window_start,
+# daily_limit_usd, expires_at} / mode / unit=USD / usage.today{cost}。
+# 额度是 USD 计价、没有 5h 窗口：环语义取周额度剩余（对齐全卡"剩余递减"），
+# daily_limit=0 且 mode=unrestricted 表示无日限额——今日已用只进 hover 文本，
+# 没有分母的比例一律不画（伪造读数）。
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+CODEX_CONFIG_PATH = CODEX_HOME / "config.toml"
+CODEX_AUTH_PATH = CODEX_HOME / "auth.json"
+CODEX_USAGE_HOSTS = ("uapi.ccwu.cc",)   # 中转站用量接口白名单（沿用 GLM 的 SSRF 策略）
+CODEX_USAGE_MAX_BYTES = 65536           # 响应体上限：正常几十 KB，防异常流撑爆内存
+
+
+def _codex_usage_url():
+    """从 Codex CLI 配置解析 (usage_url, api_key)；解析不出返回 (None, None)。
+
+    URL 安全校验沿用 GLM 源策略：https + 域名白名单 + DNS 解析后逐 IP 阻断
+    私网/环回/链路本地/保留地址；_OPENER 已禁重定向，Bearer key 不会被带往
+    其他主机。"""
+    try:
+        key = json.loads(CODEX_AUTH_PATH.read_text(encoding="utf-8")).get(
+            "OPENAI_API_KEY", "")
+    except (json.JSONDecodeError, OSError):
+        return None, None
+    key = (key or "").strip()
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+    if not key:
+        return None, None
+
+    import tomllib
+    try:
+        with open(CODEX_CONFIG_PATH, "rb") as f:
+            cfg = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None, None
+    provider = (cfg.get("model_providers") or {}).get(cfg.get("model_provider", ""))
+    host = urlparse((provider or {}).get("base_url", "")).hostname or ""
+    if host not in CODEX_USAGE_HOSTS:
+        if host:
+            print(f"Codex 用量域名不在白名单，跳过: {host}")
+        return None, None
+
+    try:
+        infos = socket.getaddrinfo(host, 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror:
+        return None, None
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return None, None
+    return f"https://{host}/v1/usage", key
+
+
+def _codex_weekly_reset_ts(window_start):
+    """由周窗口起点推算重置时刻（epoch 秒）；推不出或明显不合理返回 0。
+
+    服务端只给 weekly_window_start（本周一 00:00 +08:00），重置点 = 起点 + 7 天
+    属客户端推算：起点在未来（乱数据）、或 now 已越过推算点而服务端窗口还没
+    滚动（数据陈旧），都不推算——返回 0 让上层显示等待而非编一个倒计时。
+    aware 时间全程保留原始偏移、按 UTC 比较，不做本地时区假设。"""
+    if not window_start:
+        return 0.0
+    try:
+        start = datetime.fromisoformat(window_start)
+    except (TypeError, ValueError):
+        return 0.0
+    start_ts = start.timestamp()  # naive 视作 UTC，避免隐式本地时区假设
+    reset_ts = start_ts + 7 * 86400
+    now = time.time()
+    if start_ts > now or now >= reset_ts:
+        return 0.0
+    return reset_ts
+
+
+def fetch_codex_usage():
+    """读取 Codex 中转订阅的周/月 USD 额度，返回 dict 或 None。
+
+    未配置 / 域名不认识 / key 失效 / 网络失败统一返回 None，界面按无数据
+    处理（虚线空环 + "--"），沿用既有的"不伪造读数"约定。"""
+    url, key = _codex_usage_url()
+    if not url:
+        return None
+    req = Request(url, headers={
+        "Authorization": f"Bearer {key}",
+        "Accept-Language": "en-US,en",
+    })
+    try:
+        with _OPENER.open(req, timeout=10) as resp:
+            raw = resp.read(CODEX_USAGE_MAX_BYTES + 1)
+        if len(raw) > CODEX_USAGE_MAX_BYTES:
+            print("Codex 用量响应超过大小上限，已丢弃")
+            return None
+        body = json.loads(raw.decode("utf-8"))
+        sub = body.get("subscription") or {}
+        weekly_limit = sub.get("weekly_limit_usd") or 0
+        weekly_used = sub.get("weekly_usage_usd")
+        if weekly_limit <= 0 or weekly_used is None:
+            return None
+        monthly_limit = sub.get("monthly_limit_usd") or 0
+        monthly_used = sub.get("monthly_usage_usd")
+        today_cost = (body.get("usage") or {}).get("today") or {}
+        return {
+            "weekly_remaining": max(0.0, min(
+                100.0, (weekly_limit - weekly_used) / weekly_limit * 100)),
+            "weekly_reset_ts": _codex_weekly_reset_ts(
+                sub.get("weekly_window_start")),
+            "weekly_used_usd": float(weekly_used),
+            "weekly_limit_usd": float(weekly_limit),
+            "monthly_remaining": (
+                max(0.0, min(100.0, (monthly_limit - monthly_used)
+                             / monthly_limit * 100))
+                if monthly_limit > 0 and monthly_used is not None else None),
+            "today_cost_usd": (
+                float(today_cost["cost"])
+                if isinstance(today_cost, dict)
+                and today_cost.get("cost") is not None else None),
+            "unrestricted": (body.get("mode") == "unrestricted"
+                             and not sub.get("daily_limit_usd")),
+        }
+    except (URLError, OSError, json.JSONDecodeError, ValueError,
+            TypeError) as exc:
+        print(f"Codex 用量错误: {exc}")
+        return None
+
+
 # ── 番茄钟作息推导 ────────────────────────────────────────────────────
 _workday_cache = {}
 
@@ -628,13 +759,18 @@ def _load_font(candidates, size, weight=None):
     return _FONT_CACHE[key]
 
 
-# ── UI 规格（紧凑状态轨：品牌图标 + 短期额度 / 番茄阶段圆环）──
-WIDGET_W, WIDGET_H = 44, 232
+# ── UI 规格（紧凑状态轨：品牌图标 + 短期额度 / 周预算 / 番茄阶段圆环）──
+WIDGET_W, WIDGET_H = 44, 252
 RAIL_RADIUS = WIDGET_W // 2
-SLOT_KEYS = ("glm", "kimi", "pomo")
-SLOT_CENTERS = (31, 106, 181)
-SLOT_BREAKS = (69, 144)
-SLOT_PERCENT_TOPS = (50, 125, 200)
+# 槽位规格单一来源：key + 圆环中心 y，其余（hover 命中分界 / 百分比文字顶）
+# 全部由它推导——加槽只改这一处，不再五处同步。
+# v1.28 四槽紧凑布局：GLM、Kimi、Codex、番茄，槽距 60 比旧 75 紧凑，
+# 总高 252 而非 307。
+SLOT_SPECS = (("glm", 28), ("kimi", 88), ("codex", 148), ("pomo", 208))
+SLOT_KEYS = tuple(key for key, _ in SLOT_SPECS)
+SLOT_CENTERS = tuple(center for _, center in SLOT_SPECS)
+SLOT_BREAKS = tuple((a[1] + b[1]) // 2 for a, b in zip(SLOT_SPECS, SLOT_SPECS[1:]))
+SLOT_PERCENT_TOPS = tuple(center + 19 for _, center in SLOT_SPECS)
 SS = 4                          # 超采样倍率：先画 4 倍大图再 LANCZOS 缩小抗锯齿
 CARD_BG = (28, 28, 30, 190)     # #1C1C1E @75%，iOS secondarySystemBackground(dark)
 HAIRLINE = (255, 255, 255, 26)  # 发丝描边 / 分隔线
@@ -649,6 +785,8 @@ ORANGE = (255, 159, 10, 255)    # iOS systemOrange：15–40%
 RED = (255, 69, 58, 255)        # iOS systemRed：<15%（数字同步染红）
 GLM_BLUE = (18, 105, 203, 255)  # GLM 主色：深蓝
 KIMI_GREEN = (48, 209, 88, 255) # Kimi 主色：绿色
+CODEX_MAGENTA = (214, 51, 132, 255)  # Codex 主色：洋红（色相 320–335° 是全卡唯一空闲区间，避开蓝/绿/紫/teal 与告警三色）
+CODEX_DISC = (192, 38, 110, 255)      # Codex 底盘：洋红深一档
 FOCUS_COLOR = (191, 90, 242, 255)   # Apple 专注紫：工作阶段
 REST_COLOR = (100, 210, 255, 255)   # teal：休息阶段
 OFF_COLOR = (142, 142, 147, 255)    # iOS systemGray：非工作时段（待机/午休/下班/假日）
@@ -755,6 +893,20 @@ def _draw_kimi_mark(d, cx, cy, size):
                cx + size * 0.12, cy + size * 0.12], fill=(46, 130, 76, 255))
 
 
+def _draw_codex_mark(d, cx, cy, size):
+    """Codex 的终端提示符标记：❯ 折线箭头 + 短横光标，洋红底盘反白。
+
+    12px 下可辨识优先于品牌还原（圆桌结论：OpenAI 花结交织在此尺寸是物理
+    极限），与 GLM 晶体 / Kimi 星芒 / 番茄沙漏同为高对比简洁剪影。"""
+    width = max(2, round(size * 0.18))
+    hw, hh = size * 0.26, size * 0.36
+    d.line([(cx - hw - size * 0.12, cy - hh), (cx - hw + size * 0.16, cy),
+            (cx - hw - size * 0.12, cy + hh)],
+           fill=(255, 255, 255, 255), width=width, joint="curve")
+    d.line([(cx + size * 0.05, cy + hh * 0.8), (cx + size * 0.42, cy + hh * 0.8)],
+           fill=(255, 255, 255, 255), width=width)
+
+
 def _draw_pomodoro_mark(d, cx, cy, size, color):
     """番茄阶段使用简洁沙漏，工作/休息/非工作只变色，不改变图形语义。"""
     half_w, half_h = size * 0.32, size * 0.44
@@ -786,11 +938,12 @@ def _draw_quota_badge(d, cx, cy, radius, remaining):
     d.ellipse([x - badge_r, y - badge_r, x + badge_r, y + badge_r], fill=color)
 
 
-def create_widget_image(glm, kimi, pomo, dim, glass=False):
-    """生成窄幅状态轨：GLM、Kimi 与番茄阶段三枚图标圆环。
+def create_widget_image(glm, kimi, codex, pomo, dim, glass=False):
+    """生成窄幅状态轨：GLM、Kimi、Codex 与番茄阶段四枚图标圆环。
 
-    主轨只呈现短期额度与当前番茄阶段；重置、周/月额度和精确读数保留在 hover
-    详情面板中。每个图标下方显示对应剩余比例。"""
+    主轨只呈现各源最关键的一格读数（GLM/Kimi 短期额度、Codex 周预算、当前
+    番茄阶段）；重置、周/月额度和精确读数保留在 hover 详情面板中。每个图标
+    下方显示对应剩余比例。"""
     s = SS
     cw, ch = WIDGET_W * s, WIDGET_H * s
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
@@ -804,6 +957,7 @@ def create_widget_image(glm, kimi, pomo, dim, glass=False):
     glyph_size = 12 * s
     glm_remaining = glm["remaining"]
     kimi_remaining = kimi["remaining"]
+    codex_remaining = codex["remaining"]
     slot_centers = tuple(value * s for value in SLOT_CENTERS)
     pct_font = _load_font(NUM_FONT, 11 * s)
 
@@ -835,15 +989,28 @@ def create_widget_image(glm, kimi, pomo, dim, glass=False):
     _draw_quota_badge(d, cx, slot_centers[1], radius, kimi_remaining)
     draw_percentage(SLOT_PERCENT_TOPS[1], kimi_remaining)
 
+    _draw_ring(d, cx, slot_centers[2], radius, stroke,
+               0 if codex_remaining is None else codex_remaining / 100,
+               CODEX_MAGENTA, no_data=codex_remaining is None)
+    if codex_remaining is None:
+        d.line([(cx - glyph_size * 0.28, slot_centers[2]),
+                (cx + glyph_size * 0.28, slot_centers[2])],
+               fill=OFF_COLOR, width=max(2, s))
+    else:
+        _draw_icon_disc(d, cx, slot_centers[2], glyph_size * 0.75, CODEX_DISC)
+        _draw_codex_mark(d, cx, slot_centers[2], glyph_size)
+    _draw_quota_badge(d, cx, slot_centers[2], radius, codex_remaining)
+    draw_percentage(SLOT_PERCENT_TOPS[2], codex_remaining)
+
     stage = pomo["stage"]
     stage_color = _stage_color(stage)
     if dim:
         stage_color = stage_color[:3] + (int(255 - 145 * dim),)
-    _draw_ring(d, cx, slot_centers[2], radius, stroke,
+    _draw_ring(d, cx, slot_centers[3], radius, stroke,
                pomo["progress"], stage_color)
-    _draw_icon_disc(d, cx, slot_centers[2], glyph_size * 0.75, stage_color)
-    _draw_pomodoro_mark(d, cx, slot_centers[2], glyph_size, (248, 248, 250, 255))
-    draw_percentage(SLOT_PERCENT_TOPS[2], pomo["progress"] * 100)
+    _draw_icon_disc(d, cx, slot_centers[3], glyph_size * 0.75, stage_color)
+    _draw_pomodoro_mark(d, cx, slot_centers[3], glyph_size, (248, 248, 250, 255))
+    draw_percentage(SLOT_PERCENT_TOPS[3], pomo["progress"] * 100)
 
     return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
 
@@ -891,17 +1058,39 @@ def create_detail_image(info, target, glass=False):
         title, accent = "GLM 用量", GLM_BLUE
         line_one = f"周额度 {info['glm_weekly']:.0f}%"
         line_two = reset_text(info["glm_reset_left"])
+        meta_x = 84
     elif target == "kimi":
         value = info["kimi_remaining"]
         title, accent = "Kimi 用量", KIMI_GREEN
         monthly = info["kimi_monthly"]
         line_one = "月额度 --" if monthly is None else f"月额度 {monthly:.0f}%"
         line_two = reset_text(info["kimi_reset_left"])
+        meta_x = 84
+    elif target == "codex":
+        value = info["codex_remaining"]
+        title, accent = "Codex 用量", CODEX_MAGENTA
+        # 中转额度是 USD 计价：主数值是周预算剩余比例，配行给绝对值与今日消耗。
+        # 无日限（daily_limit=0 + unrestricted）没有分母，绝不折算成比例，只以
+        # 文字标注；月额度放窗口 tooltip。meta 起点比其他卡左移（数值列最宽
+        # "100%" 也不到 64px，不冲突），两行绝对值文本才放得下。
+        meta_x = 70
+        line_one = (f"周 ${info['codex_weekly_used']:.1f}"
+                    f"/${info['codex_weekly_limit']:.0f}")
+        today = info.get("codex_today_cost")
+        left = info.get("codex_reset_left")
+        if left is None:
+            reset = "等待窗口"
+        else:
+            days, rem = divmod(max(0, int(left)), 86400)
+            reset = f"{days}天{rem // 3600}h"
+        line_two = (f"{reset} · 今日 ${today:.1f}"
+                    if today is not None else reset)
     else:
         value = info["pomo_progress"] * 100
         title, accent = "番茄阶段", _stage_color(info["pomo_stage"])
         line_one = info["pomo_label"]
         line_two = info["pomo_detail"]
+        meta_x = 84
 
     value_text = "--" if value is None else f"{max(0, min(100, value)):.0f}%"
     title_font = _load_font(ZH_FONT, 10 * s, ZH_WEIGHT)
@@ -910,8 +1099,8 @@ def create_detail_image(info, target, glass=False):
     d.text((12 * s, 8 * s), title, font=title_font, fill=TEXT_SUB)
     d.text((12 * s, 25 * s), value_text, font=value_font,
            fill=TEXT_DIM if value is None else accent)
-    d.text((84 * s, 23 * s), line_one, font=meta_font, fill=TEXT_SUB)
-    d.text((84 * s, 40 * s), line_two, font=meta_font, fill=TEXT_DIM)
+    d.text((meta_x * s, 23 * s), line_one, font=meta_font, fill=TEXT_SUB)
+    d.text((meta_x * s, 40 * s), line_two, font=meta_font, fill=TEXT_DIM)
 
     return img.resize((PANEL_W, PANEL_H), Image.LANCZOS)
 
@@ -1083,6 +1272,12 @@ class GLMWidget:
         self._kimi_remaining = None  # Kimi 短期剩余；None = 无数据（daemon 未跑）
         self._kimi_reset_ts = 0.0
         self._kimi_monthly_remaining = None  # Kimi 月额度剩余；None = 无数据
+        self._codex_remaining = None  # Codex 周预算剩余；None = 无数据（未配置/失败）
+        self._codex_reset_ts = 0.0    # 周窗口预计重置时刻（epoch 秒），0 = 推算不出
+        self._codex_weekly = (0.0, 0.0)  # (已用 USD, 上限 USD)，详情卡绝对值
+        self._codex_today_cost = None    # 今日已用 USD；None = 无数据
+        self._codex_monthly_remaining = None  # Codex 月额度剩余；仅 tooltip
+        self._codex_unrestricted = False    # 无日限额（daily_limit=0 + unrestricted）
         self._pomo = _pomo_state()
         self._dim = 0.0           # 番茄钟闪烁调光系数 0~1（正弦淡出）
         self._blinking = False
@@ -1156,8 +1351,13 @@ class GLMWidget:
             if rect:
                 x = rect[2] - self._win_w - 8
         try:
-            with open(UI_STATE_PATH, "w", encoding="utf-8") as f:
-                json.dump({"x": x, "y": y}, f)
+            # 固定写项目内 ui_state.json；resolve 后显式断言仍在项目目录，
+            # 把「路径由 __file__ 派生、无外部输入」的隐式约束变成运行时保证
+            state = UI_STATE_PATH.resolve()
+            project_dir = Path(__file__).resolve().parent
+            if project_dir not in state.parents:
+                raise OSError("状态文件越出项目目录，拒绝写入")
+            state.write_text(json.dumps({"x": x, "y": y}), encoding="utf-8")
         except OSError:
             pass  # 位置记忆写失败不影响运行
 
@@ -1177,14 +1377,13 @@ class GLMWidget:
     # 贴边隐藏 + hover 详情面板 --------------------------------------
     @staticmethod
     def _slot_at(local_y):
-        """返回纵向状态轨中被悬停的独立项。"""
-        if local_y < 0 or local_y > WIDGET_H:
+        """返回纵向状态轨中被悬停的独立项（分界由 SLOT_SPECS 推导）。"""
+        if local_y < 0 or local_y >= WIDGET_H:
             return None
-        if local_y < SLOT_BREAKS[0]:
-            return SLOT_KEYS[0]
-        if local_y < SLOT_BREAKS[1]:
-            return SLOT_KEYS[1]
-        return SLOT_KEYS[2]
+        for key, brk in zip(SLOT_KEYS, SLOT_BREAKS):
+            if local_y < brk:
+                return key
+        return SLOT_KEYS[-1]
 
     def _poll_hover(self):
         """150ms 轮询指针位置，驱动贴边隐藏与详情面板的状态机"""
@@ -1404,6 +1603,12 @@ class GLMWidget:
             "kimi_reset_left": (self._kimi_reset_ts - time.time()
                                 if self._kimi_reset_ts else None),
             "kimi_monthly": self._kimi_monthly_remaining,
+            "codex_remaining": self._codex_remaining,
+            "codex_weekly_used": self._codex_weekly[0],
+            "codex_weekly_limit": self._codex_weekly[1],
+            "codex_reset_left": (self._codex_reset_ts - time.time()
+                                 if self._codex_reset_ts else None),
+            "codex_today_cost": self._codex_today_cost,
             "pomo_label": p["label"],
             "pomo_detail": detail,
             "pomo_progress": p["progress"],
@@ -1423,11 +1628,15 @@ class GLMWidget:
             "remaining": (disp.get("kimi", self._kimi_remaining)
                           if self._kimi_remaining is not None else None),
         }
+        codex_view = {
+            "remaining": (disp.get("codex", self._codex_remaining)
+                          if self._codex_remaining is not None else None),
+        }
         if self._hidden or self._sliding_out:
             img = _create_strip_image(self._pomo["progress"])
         else:
-            img = create_widget_image(glm_view, kimi_view, self._pomo, self._dim,
-                                      glass=self._glass)
+            img = create_widget_image(glm_view, kimi_view, codex_view,
+                                      self._pomo, self._dim, glass=self._glass)
         # 细边/整卡窗口形态（region + Acrylic）随图像一起切换，幂等
         self._apply_visual_mode(self._hidden or self._sliding_out)
         _update_layered_window(self._hwnd, img)
@@ -1454,6 +1663,21 @@ class GLMWidget:
             parts.append(kp)
             if self._kimi_monthly_remaining is not None:
                 parts.append(f"Kimi 月额度剩余: {self._kimi_monthly_remaining:.0f}%")
+        if self._codex_remaining is None:
+            parts.append("Codex: 无数据（未配置中转 / 密钥失效 / 网络失败）")
+        else:
+            cp = (f"Codex 周预算剩余: {self._codex_remaining:.0f}%"
+                  f"（${self._codex_weekly[0]:.1f}/${self._codex_weekly[1]:.0f}）")
+            if self._codex_reset_ts:
+                left = max(0, self._codex_reset_ts - time.time())
+                days, rem = divmod(int(left), 86400)
+                cp += f"（预计 {days}天{rem // 3600}h 后重置）"
+            parts.append(cp)
+            if self._codex_today_cost is not None:
+                daily = ("（无日限额）" if self._codex_unrestricted else "")
+                parts.append(f"Codex 今日已用: ${self._codex_today_cost:.2f}{daily}")
+            if self._codex_monthly_remaining is not None:
+                parts.append(f"Codex 月额度剩余: {self._codex_monthly_remaining:.0f}%")
         parts.append(f"番茄钟 {detail}")
         self.root.tooltip_text = " | ".join(parts)
         if self._panel_visible:
@@ -1527,16 +1751,21 @@ class GLMWidget:
 
     # Token 数据刷新 -------------------------------------------------------
     def _do_refresh(self):
-        def _fetch():
-            result = fetch_usage()
-            kimi = fetch_kimi_usage()
-            self.root.after(0, lambda: self._apply_usage(result, kimi))
+        """三源各自独立线程拉取、独立落地：任一源一次 10s 超时不再连带
+        推迟其余源的 UI 更新（旧实现顺序 fetch，Codex 慢会拖住 GLM/Kimi）。"""
+        def _spawn(fetch, apply):
+            def run():
+                result = fetch()
+                self.root.after(0, lambda: apply(result))
+            threading.Thread(target=run, daemon=True).start()
 
-        threading.Thread(target=_fetch, daemon=True).start()
+        _spawn(fetch_usage, self._apply_glm_usage)
+        _spawn(fetch_kimi_usage, self._apply_kimi_usage)
+        _spawn(fetch_codex_usage, self._apply_codex_usage)
         self._schedule()
 
-    def _apply_usage(self, result, kimi):
-        """UI 线程应用抓取结果：短期额度平滑过渡，详情值直接更新。"""
+    def _apply_glm_usage(self, result):
+        """UI 线程应用 GLM 抓取结果：短期额度平滑过渡，详情值直接更新。"""
         self._last_refresh = datetime.now().strftime("%H:%M:%S")
         if result:
             short_term_pct = result.get("short_term_percentage")
@@ -1548,7 +1777,12 @@ class GLMWidget:
             weekly_pct = result.get("weekly_percentage")
             if weekly_pct is not None:
                 self._weekly_remaining = min(max(100 - weekly_pct, 0), 100)
+        self._render()
 
+    def _apply_kimi_usage(self, kimi):
+        """UI 线程应用 Kimi 抓取结果；daemon 不在跑时不清空既有读数，
+        从未有过数据则保持 None（空轨道）。"""
+        self._last_refresh = datetime.now().strftime("%H:%M:%S")
         if kimi:
             self._kimi_remaining = min(
                 max(100 - kimi["short_term_percentage"], 0), 100)
@@ -1558,7 +1792,21 @@ class GLMWidget:
             if monthly_pct is not None:
                 self._kimi_monthly_remaining = min(
                     max(100 - monthly_pct, 0), 100)
-        # daemon 不在跑时不清空既有读数；从未有过数据则保持 None（空轨道）
+        self._render()
+
+    def _apply_codex_usage(self, codex):
+        """UI 线程应用 Codex 抓取结果；失败时保持既有读数，从未有过数据
+        则保持 None（虚线空环，不伪造读数）。"""
+        self._last_refresh = datetime.now().strftime("%H:%M:%S")
+        if codex:
+            self._codex_remaining = codex["weekly_remaining"]
+            self._set_targets(codex=self._codex_remaining)
+            self._codex_reset_ts = codex["weekly_reset_ts"]
+            self._codex_weekly = (codex["weekly_used_usd"],
+                                  codex["weekly_limit_usd"])
+            self._codex_today_cost = codex["today_cost_usd"]
+            self._codex_monthly_remaining = codex["monthly_remaining"]
+            self._codex_unrestricted = codex["unrestricted"]
         self._render()
 
     def _schedule(self):
