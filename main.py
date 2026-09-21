@@ -1,9 +1,8 @@
-"""GLM + Kimi 用量悬浮小组件 + 番茄工作闹钟 — Acrylic 毛玻璃竖版侧栏贴靠屏幕右缘
+"""GLM + Kimi 用量悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨
 
-Win11 Acrylic 真毛玻璃卡片：上段三列用量——TOKEN 竖排标签、GLM 三竖条（短期剩余 /
-5h 窗口重置倒计时 / 周剩余）、KIMI 三竖条（短期剩余 / 5h 窗口重置倒计时 /
-月剩余，读 Kimi Code CLI 本地 daemon）；下段番茄钟倒计时 + 细进度条。
-空闲自动缩成右缘微光细边，悬停展开详情面板；数值变化带缓动动效。
+Win11 Acrylic 真毛玻璃状态轨：GLM 深蓝几何晶体、Kimi 绿色星芒、番茄沙漏
+三个图标槽位的圆环分别表示短期额度和当前番茄阶段剩余。悬停从左侧展开
+详情面板，空闲时仍自动缩成右缘 6px 番茄进度条。
 """
 
 import ctypes
@@ -155,19 +154,23 @@ def _unset_acrylic(hwnd):
         ctypes.c_void_p(hwnd), ctypes.byref(data)))
 
 
-def _set_round_corners(hwnd, w, h):
+def _set_round_corners(hwnd, w, h, radius=CORNER_RADIUS):
     """用 SetWindowRgn 裁剪圆角（只作用于分层位图内容与命中测试）。
     注意：region 裁不到 SetWindowCompositionAttribute 绘制的 Acrylic 模糊底
     （模糊底按窗口矩形方形绘制），必须配合 _set_dwm_round 才能得到圆角玻璃。"""
     rgn = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, w + 1, h + 1,
-                                                 CORNER_RADIUS * 2,
-                                                 CORNER_RADIUS * 2)
+                                                 radius * 2, radius * 2)
     if not rgn:
         return False
     ok = ctypes.windll.user32.SetWindowRgn(ctypes.c_void_p(hwnd), rgn, True)
     if not ok:
         ctypes.windll.gdi32.DeleteObject(rgn)
     return bool(ok)
+
+
+def _clear_window_region(hwnd):
+    """清除硬像素 region，让分层位图自身的 alpha 边缘负责抗锯齿。"""
+    return bool(ctypes.windll.user32.SetWindowRgn(ctypes.c_void_p(hwnd), None, True))
 
 
 def _set_dwm_round(hwnd, pref=2):
@@ -625,25 +628,33 @@ def _load_font(candidates, size, weight=None):
     return _FONT_CACHE[key]
 
 
-# ── UI 规格（Apple 风格竖版侧栏，与 cc cli 研讨定稿：iOS 暗色系统色 + 发丝线）──
-WIDGET_W, WIDGET_H = 140, 192   # 最终窗口尺寸（逻辑像素）；v1.21 加宽容纳三列
-SS = 3                          # 超采样倍率：先画 3 倍大图再 LANCZOS 缩小抗锯齿
+# ── UI 规格（紧凑状态轨：品牌图标 + 短期额度 / 番茄阶段圆环）──
+WIDGET_W, WIDGET_H = 44, 232
+RAIL_RADIUS = WIDGET_W // 2
+SLOT_KEYS = ("glm", "kimi", "pomo")
+SLOT_CENTERS = (31, 106, 181)
+SLOT_BREAKS = (69, 144)
+SLOT_PERCENT_TOPS = (50, 125, 200)
+SS = 4                          # 超采样倍率：先画 4 倍大图再 LANCZOS 缩小抗锯齿
 CARD_BG = (28, 28, 30, 190)     # #1C1C1E @75%，iOS secondarySystemBackground(dark)
 HAIRLINE = (255, 255, 255, 26)  # 发丝描边 / 分隔线
 TOP_LIGHT = (255, 255, 255, 38)  # 顶部内高光（伪玻璃上光）
-TEXT_MAIN = (255, 255, 255, 255)
+RAIL_BG = (5, 5, 7, 250)
+RAIL_HAIRLINE = (255, 255, 255, 12)
 TEXT_SUB = (255, 255, 255, 185)
 TEXT_DIM = (255, 255, 255, 100)
 BAR_TRACK = (255, 255, 255, 36)
 GREEN = (48, 209, 88, 255)      # iOS systemGreen：Token ≥40%
 ORANGE = (255, 159, 10, 255)    # iOS systemOrange：15–40%
 RED = (255, 69, 58, 255)        # iOS systemRed：<15%（数字同步染红）
+GLM_BLUE = (18, 105, 203, 255)  # GLM 主色：深蓝
+KIMI_GREEN = (48, 209, 88, 255) # Kimi 主色：绿色
 FOCUS_COLOR = (191, 90, 242, 255)   # Apple 专注紫：工作阶段
 REST_COLOR = (100, 210, 255, 255)   # teal：休息阶段
 OFF_COLOR = (142, 142, 147, 255)    # iOS systemGray：非工作时段（待机/午休/下班/假日）
 YELLOW = (255, 214, 10, 255)        # iOS systemYellow：窗口重置倒计时填充
 
-NUM_FONT = ("seguisb.ttf",)   # Segoe UI Semibold（数字，等宽步进不抖）
+NUM_FONT = ("seguisb.ttf",)   # Segoe UI Semibold（详情面板数值）
 BOLD_FONT = ("segoeuib.ttf",)  # Segoe UI Bold（TOKEN 标签）
 # 中文：思源黑体可变字体（NotoSansSC-VF，wght=700），缺失时回退微软雅黑/黑体
 ZH_FONT = ("NotoSansSC-VF.ttf", "msyhbd.ttc", "msyh.ttc", "simhei.ttf")
@@ -652,8 +663,11 @@ ZH_WEIGHT = 700
 # 贴边隐藏 / 详情面板交互
 EDGE_STRIP = 6      # 贴边隐藏后露出的细边宽度（px）
 HIDE_DELAY = 1.2    # 鼠标离开后多少秒滑入右缘
-PANEL_DELAY = 0.4   # 悬停多少秒展开详情面板
-PANEL_W = 200       # 详情面板宽度
+PANEL_DELAY = 0.3   # 悬停多少秒展开对应项的详情卡片
+PANEL_SWITCH_DELAY = 0.15
+PANEL_CLOSE_DELAY = 0.3
+PANEL_W, PANEL_H = 168, 64
+PANEL_GAP = 8
 BOOT_GRACE = 5.0    # 启动后的宽限期，期间不自动隐藏（先亮个相）
 
 
@@ -684,171 +698,152 @@ def _draw_tracked(d, cx, y_top, text, font, tracking, fill):
         x += font.getlength(ch) + tracking
 
 
-def _draw_tabular_timer(d, cx, cy, remaining_sec, font, dim):
-    """等宽步进逐字绘制 MM:SS（伪 tabular，秒针跳动零抖动），冒号每秒呼吸。
-    dim∈[0,1]：阶段切换闪烁时整体柔和淡出（正弦调光）"""
-    m, s = divmod(min(remaining_sec, 99 * 60 + 59), 60)
-    text = f"{m:02d}:{s:02d}"
-    digit_w = font.getlength("0")
-    colon_w = font.getlength(":")
-    total = 4 * digit_w + colon_w
-    colon_alpha = 150 if remaining_sec % 2 else 255  # 冒号每秒呼吸
-    fade = 1 - 0.73 * dim
-    x = cx - total / 2
-    for ch in text:
-        cell = colon_w if ch == ":" else digit_w
-        alpha = int((colon_alpha if ch == ":" else 255) * fade)
-        bbox = d.textbbox((0, 0), ch, font=font)
-        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        d.text(
-            (x + (cell - w) / 2 - bbox[0], cy - h / 2 - bbox[1]),
-            ch, font=font, fill=(255, 255, 255, alpha),
-        )
-        x += cell
+def _draw_ring(d, cx, cy, radius, stroke, frac, color, no_data=False):
+    """绘制带圆头的状态环；no_data 使用虚线轨道，避免与耗尽态混淆。"""
+    bbox = [cx - radius, cy - radius, cx + radius, cy + radius]
+    if no_data:
+        for start in range(-90, 270, 52):
+            d.arc(bbox, start, start + 28, fill=OFF_COLOR, width=stroke)
+        return
+
+    d.ellipse(bbox, outline=BAR_TRACK, width=stroke)
+    frac = max(0.0, min(1.0, frac))
+    if frac <= 0.001:
+        return
+    if frac >= 0.999:
+        d.ellipse(bbox, outline=color, width=stroke)
+        return
+
+    start = -90
+    end = start + 360 * frac
+    d.arc(bbox, start, end, fill=color, width=stroke)
+    cap_r = stroke / 2
+    for angle in (start, end):
+        radians = math.radians(angle)
+        x = cx + radius * math.cos(radians)
+        y = cy + radius * math.sin(radians)
+        d.ellipse([x - cap_r, y - cap_r, x + cap_r, y + cap_r], fill=color)
 
 
-def _draw_capsule(d, cx, y, length, height, frac, color, track=BAR_TRACK):
-    """横向细胶囊进度条：轨道 + 按比例填充（iOS 锁屏电量条形态）"""
-    x = cx - length / 2
-    d.rounded_rectangle([x, y, x + length, y + height],
-                        radius=int(height / 2), fill=track)
-    if frac > 0.01:
-        fill_w = max(length * frac, height)
-        d.rounded_rectangle([x, y, x + fill_w, y + height],
-                            radius=int(height / 2), fill=color)
+def _draw_glm_mark(d, cx, cy, size):
+    """GLM 的深蓝晶体标记：角形轮廓配合两道切面。"""
+    half = size / 2
+    points = [
+        (cx, cy - half), (cx + half * 0.82, cy - half * 0.22),
+        (cx + half * 0.46, cy + half), (cx - half * 0.63, cy + half * 0.42),
+        (cx - half * 0.78, cy - half * 0.36),
+    ]
+    width = max(2, round(size * 0.17))
+    d.line(points + [points[0]], fill=(219, 237, 255, 255), width=width, joint="curve")
+    d.line([points[0], (cx + half * 0.46, cy + half)],
+           fill=(147, 199, 250, 255), width=width)
+    d.line([(cx - half * 0.78, cy - half * 0.36),
+            (cx + half * 0.82, cy - half * 0.22)],
+           fill=(147, 199, 250, 255), width=max(1, width - 1))
 
 
-def _draw_vertical_capsule(d, x, y, width, height, frac, color, track=BAR_TRACK):
-    """竖向细胶囊进度条：填充自下向上，用于弱化呈现周额度已用比例。"""
-    d.rounded_rectangle([x, y, x + width, y + height],
-                        radius=int(width / 2), fill=track)
-    if frac > 0.01:
-        fill_h = max(height * frac, width)
-        d.rounded_rectangle([x, y + height - fill_h, x + width, y + height],
-                            radius=int(width / 2), fill=color)
+def _draw_kimi_mark(d, cx, cy, size):
+    """Kimi 的绿色星芒标记：固定八角，远看仍有清晰轮廓。"""
+    points = []
+    for i in range(16):
+        angle = math.radians(-90 + i * 22.5)
+        radius = size * (0.48 if i % 2 == 0 else 0.21)
+        points.append((cx + math.cos(angle) * radius,
+                       cy + math.sin(angle) * radius))
+    d.polygon(points, fill=(224, 255, 229, 255))
+    d.ellipse([cx - size * 0.12, cy - size * 0.12,
+               cx + size * 0.12, cy + size * 0.12], fill=(46, 130, 76, 255))
 
 
-def _draw_column_header(d, cx, title, pct, s):
-    """列顶单行小标题 + 短期剩余小数字（如 GLM 99）：无数据时数字显示 --"""
-    title_font = _load_font(BOLD_FONT, 9 * s)
-    num_font = _load_font(NUM_FONT, 12 * s)
-    num = "--" if pct is None else f"{int(pct)}"
-    color = TEXT_DIM if pct is None else (
-        RED if pct < 15 else TEXT_MAIN
-    )
-    tw = title_font.getlength(title)
-    nw = num_font.getlength(num)
-    gap = 3.5 * s
-    x = cx - (tw + gap + nw) / 2
-    baseline = 25 * s
-    d.text((x, baseline), title, font=title_font, fill=TEXT_SUB, anchor="ls")
-    d.text((x + tw + gap, baseline), num, font=num_font, fill=color, anchor="ls")
+def _draw_pomodoro_mark(d, cx, cy, size, color):
+    """番茄阶段使用简洁沙漏，工作/休息/非工作只变色，不改变图形语义。"""
+    half_w, half_h = size * 0.32, size * 0.44
+    width = max(2, round(size * 0.15))
+    d.line([(cx - half_w, cy - half_h), (cx + half_w, cy - half_h)],
+           fill=color, width=width)
+    d.line([(cx - half_w, cy + half_h), (cx + half_w, cy + half_h)],
+           fill=color, width=width)
+    d.line([(cx - half_w * 0.8, cy - half_h), (cx + half_w * 0.72, cy + half_h)],
+           fill=color, width=width)
+    d.line([(cx + half_w * 0.8, cy - half_h), (cx - half_w * 0.72, cy + half_h)],
+           fill=color, width=width)
 
 
-def _pulse_white(color, pulse):
-    """按脉冲幅度向白色混合填充色（整分心跳用，峰值混 60% 白）"""
-    if pulse <= 0:
-        return color
-    return tuple(int(c + (255 - c) * 0.6 * pulse) for c in color[:3]) + (color[3],)
+def _draw_icon_disc(d, cx, cy, radius, color):
+    """状态环中央的品牌色底盘，让小尺寸图标保持足够识别度。"""
+    d.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=color)
+
+
+def _draw_quota_badge(d, cx, cy, radius, remaining):
+    """只在额度告警时绘制小点，平台环保持自身的品牌主色。"""
+    if remaining is None or remaining >= 40:
+        return
+    badge_r = max(3, radius * 0.16)
+    color = _remaining_color(remaining)
+    x, y = cx + radius * 0.64, cy + radius * 0.64
+    d.ellipse([x - badge_r - 1, y - badge_r - 1,
+               x + badge_r + 1, y + badge_r + 1], fill=RAIL_BG)
+    d.ellipse([x - badge_r, y - badge_r, x + badge_r, y + badge_r], fill=color)
 
 
 def create_widget_image(glm, kimi, pomo, dim, glass=False):
-    """生成竖版悬浮窗图像：三列用量（TOKEN 竖排标签 / GLM 三竖条 / KIMI 三竖条）
-    + 番茄钟。glm/kimi 为视图 dict（remaining / reset_frac / pulse，glm 另有 weekly、
-    kimi 另有 monthly），kimi["remaining"] 为 None 表示无数据（daemon 未跑）。
-    glass=True 时卡片底由 DWM Acrylic 提供，只画内容与发丝线；False 回退 PIL 自绘卡片。"""
+    """生成窄幅状态轨：GLM、Kimi 与番茄阶段三枚图标圆环。
+
+    主轨只呈现短期额度与当前番茄阶段；重置、周/月额度和精确读数保留在 hover
+    详情面板中。每个图标下方显示对应剩余比例。"""
     s = SS
     cw, ch = WIDGET_W * s, WIDGET_H * s
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    if glass:
-        # Acrylic 提供模糊底，外形由 SetWindowRgn 圆角裁剪（CORNER_RADIUS），
-        # 只补一条贴合的发丝描边与顶部内高光
-        d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=CORNER_RADIUS * s,
-                            outline=HAIRLINE, width=2)
-        d.line([(16 * s, 2 * s), ((WIDGET_W - 16) * s, 2 * s)],
-               fill=TOP_LIGHT, width=s)
-    else:
-        # 深色圆角卡片 + 发丝描边 + 顶部内高光（无真模糊时的伪玻璃补偿）
-        d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=28 * s, fill=CARD_BG,
-                            outline=HAIRLINE, width=2)
-        d.line([(24 * s, 2 * s), ((WIDGET_W - 24) * s, 2 * s)], fill=TOP_LIGHT, width=s)
+    d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=RAIL_RADIUS * s,
+                        fill=RAIL_BG, outline=RAIL_HAIRLINE, width=2)
 
-    bar_top, bar_h, bar_w = 34, 54, 5
-
-    # ── 第一列：TOKEN 竖排标签（纯标识，不承载数据）──
-    tok_font = _load_font(BOLD_FONT, 8 * s)
-    for i, ch_ in enumerate("TOKEN"):
-        bbox = d.textbbox((0, 0), ch_, font=tok_font)
-        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        y = (32 + i * 12) * s
-        d.text((15 * s - w / 2 - bbox[0], y - bbox[1]), ch_,
-               font=tok_font, fill=TEXT_DIM)
-
-    # 列间竖发丝线（TOKEN 标签列与数据列分组）
-    d.line([(26 * s, 22 * s), (26 * s, 90 * s)], fill=HAIRLINE, width=s)
-
-    # ── 第二列：GLM 三竖条（短期剩余 / 5h 重置倒计时 / 周剩余）──
-    _draw_column_header(d, 56 * s, "GLM", glm["remaining"], s)
-    glm_remaining = min(max(glm["remaining"], 0), 100)
-    bar_x = [48, 56, 64]
-    for x, (frac, color) in zip(bar_x, (
-        (glm_remaining / 100, _remaining_color(glm_remaining)),
-        (glm["reset_frac"], _pulse_white(YELLOW, glm["pulse"] * (1 - dim))),
-        (min(max(glm["weekly"], 0), 100) / 100, RED),
-    )):
-        _draw_vertical_capsule(d, (x - bar_w / 2) * s, bar_top * s,
-                               bar_w * s, bar_h * s,
-                               max(0.0, min(1.0, frac)), color)
-
-    # ── 第三列：KIMI 三竖条（短期剩余 / 5h 重置倒计时 / 月剩余）──
-    _draw_column_header(d, 110 * s, "KIMI", kimi["remaining"], s)
-    if kimi["remaining"] is None:
-        kimi_bars = ((0.0, OFF_COLOR), (0.0, OFF_COLOR), (0.0, OFF_COLOR))
-    else:
-        kimi_remaining = min(max(kimi["remaining"], 0), 100)
-        monthly = kimi.get("monthly")
-        kimi_bars = (
-            (kimi_remaining / 100, _remaining_color(kimi_remaining)),
-            (kimi["reset_frac"], _pulse_white(YELLOW, kimi["pulse"] * (1 - dim))),
-            (min(max(monthly, 0), 100) / 100 if monthly is not None else 0.0, RED),
-        )
-    for x, (frac, color) in zip((102, 110, 118), kimi_bars):
-        _draw_vertical_capsule(d, (x - bar_w / 2) * s, bar_top * s,
-                               bar_w * s, bar_h * s,
-                               max(0.0, min(1.0, frac)), color)
-
-    # 分隔发丝线（上段用量 / 下段番茄钟）
-    d.line([(22 * s, 95 * s), ((WIDGET_W - 22) * s, 95 * s)], fill=HAIRLINE, width=s)
-
-    # ── 下段：阶段点 + 中文阶段词（整组居中）──
     cx = cw / 2
+    radius, stroke = 15 * s, 3 * s
+    glyph_size = 12 * s
+    glm_remaining = glm["remaining"]
+    kimi_remaining = kimi["remaining"]
+    slot_centers = tuple(value * s for value in SLOT_CENTERS)
+    pct_font = _load_font(NUM_FONT, 11 * s)
+
+    def draw_percentage(y, value):
+        text = "--" if value is None else f"{max(0, min(100, value)):.0f}%"
+        color = TEXT_DIM if value is None else TEXT_SUB
+        bbox = d.textbbox((0, 0), text, font=pct_font)
+        d.text((cx - (bbox[2] - bbox[0]) / 2 - bbox[0], y * s - bbox[1]),
+               text, font=pct_font, fill=color)
+
+    _draw_ring(d, cx, slot_centers[0], radius, stroke,
+               0 if glm_remaining is None else glm_remaining / 100,
+               GLM_BLUE, no_data=glm_remaining is None)
+    _draw_icon_disc(d, cx, slot_centers[0], glyph_size * 0.75, GLM_BLUE)
+    _draw_glm_mark(d, cx, slot_centers[0], glyph_size)
+    _draw_quota_badge(d, cx, slot_centers[0], radius, glm_remaining)
+    draw_percentage(SLOT_PERCENT_TOPS[0], glm_remaining)
+
+    _draw_ring(d, cx, slot_centers[1], radius, stroke,
+               0 if kimi_remaining is None else kimi_remaining / 100,
+               KIMI_GREEN, no_data=kimi_remaining is None)
+    if kimi_remaining is None:
+        d.line([(cx - glyph_size * 0.28, slot_centers[1]),
+                (cx + glyph_size * 0.28, slot_centers[1])],
+               fill=OFF_COLOR, width=max(2, s))
+    else:
+        _draw_icon_disc(d, cx, slot_centers[1], glyph_size * 0.75, KIMI_GREEN)
+        _draw_kimi_mark(d, cx, slot_centers[1], glyph_size)
+    _draw_quota_badge(d, cx, slot_centers[1], radius, kimi_remaining)
+    draw_percentage(SLOT_PERCENT_TOPS[1], kimi_remaining)
+
     stage = pomo["stage"]
     stage_color = _stage_color(stage)
-    stage_zh = pomo["label"]
-    zh_font = _load_font(ZH_FONT, 14 * s, ZH_WEIGHT)
-    dot_r = 3 * s
-    dot_gap = 6 * s
-    group_w = dot_r * 2 + dot_gap + zh_font.getlength(stage_zh)
-    gx = cx - group_w / 2
-    row_cy = 111 * s
-    d.ellipse([gx, row_cy - dot_r, gx + dot_r * 2, row_cy + dot_r],
-              fill=stage_color[:3] + (int(255 - 155 * dim),))
-    bbox = d.textbbox((0, 0), stage_zh, font=zh_font)
-    d.text((gx + dot_r * 2 + dot_gap - bbox[0],
-            row_cy - (bbox[3] - bbox[1]) / 2 - bbox[1]),
-           stage_zh, font=zh_font,
-           fill=(255, 255, 255, int(TEXT_SUB[3] - (TEXT_SUB[3] - 70) * dim)))
-
-    # 倒计时（等宽步进 + 冒号呼吸；off 时 remaining 即下次开工 HH:MM 折算秒）
-    _draw_tabular_timer(d, cx, 139 * s, pomo["remaining"],
-                        _load_font(NUM_FONT, 20 * s), dim)
-
-    # 阶段胶囊进度条（随秒缩减，「活着」的最低调表达）
-    bar_color = stage_color[:3] + (int(255 - 195 * dim),)
-    _draw_capsule(d, cx, 160 * s, (WIDGET_W - 2 * 22) * s, 5 * s,
-                  pomo["progress"], bar_color)
+    if dim:
+        stage_color = stage_color[:3] + (int(255 - 145 * dim),)
+    _draw_ring(d, cx, slot_centers[2], radius, stroke,
+               pomo["progress"], stage_color)
+    _draw_icon_disc(d, cx, slot_centers[2], glyph_size * 0.75, stage_color)
+    _draw_pomodoro_mark(d, cx, slot_centers[2], glyph_size, (248, 248, 250, 255))
+    draw_percentage(SLOT_PERCENT_TOPS[2], pomo["progress"] * 100)
 
     return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
 
@@ -873,88 +868,52 @@ def _create_strip_image(progress=0.0):
     return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
 
 
-def create_detail_image(info, glass=False):
-    """详情面板图像（hover 主卡片时向左展开）。
-
-    info 为 dict：
-      glm_remaining / glm_reset_left(秒, None 无) / glm_weekly
-      kimi_remaining(None 无数据) / kimi_reset_left / kimi_monthly
-      pomo_label / pomo_detail / last_refresh("HH:MM:SS" 或 "--")
-    """
+def create_detail_image(info, target, glass=False):
+    """为一个状态项生成紧凑详情卡片。"""
     s = SS
-    cw, ch = PANEL_W * s, WIDGET_H * s
+    cw, ch = PANEL_W * s, PANEL_H * s
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    if glass:
-        d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=CORNER_RADIUS * s,
-                            outline=HAIRLINE, width=2)
-        d.line([(16 * s, 2 * s), ((PANEL_W - 16) * s, 2 * s)],
-               fill=TOP_LIGHT, width=s)
-    else:
-        d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=28 * s, fill=CARD_BG,
-                            outline=HAIRLINE, width=2)
-        d.line([(24 * s, 2 * s), ((PANEL_W - 24) * s, 2 * s)],
-               fill=TOP_LIGHT, width=s)
+    d.rounded_rectangle([0, 0, cw - 1, ch - 1], radius=12 * s,
+                        fill=(24, 24, 27, 232), outline=HAIRLINE, width=2)
+    d.line([(14 * s, 2 * s), ((PANEL_W - 14) * s, 2 * s)],
+           fill=TOP_LIGHT, width=s)
 
-    title_font = _load_font(BOLD_FONT, 9 * s)
-    text_font = _load_font(ZH_FONT, 10 * s, ZH_WEIGHT)
-    val_font = _load_font(NUM_FONT, 10 * s)
-
-    def fmt_reset(left):
+    def reset_text(left):
         if left is None:
-            return ""
-        h, rem = divmod(max(0, int(left)), 3600)
-        return f"（{h}h{rem // 60:02d}m 后重置）"
+            return "等待同步"
+        hours, remainder = divmod(max(0, int(left)), 3600)
+        return f"重置 {hours}h{remainder // 60:02d}m"
 
-    pad_x = 16 * s
-    y = 20 * s
+    if target == "glm":
+        value = info["glm_remaining"]
+        title, accent = "GLM 用量", GLM_BLUE
+        line_one = f"周额度 {info['glm_weekly']:.0f}%"
+        line_two = reset_text(info["glm_reset_left"])
+    elif target == "kimi":
+        value = info["kimi_remaining"]
+        title, accent = "Kimi 用量", KIMI_GREEN
+        monthly = info["kimi_monthly"]
+        line_one = "月额度 --" if monthly is None else f"月额度 {monthly:.0f}%"
+        line_two = reset_text(info["kimi_reset_left"])
+    else:
+        value = info["pomo_progress"] * 100
+        title, accent = "番茄阶段", _stage_color(info["pomo_stage"])
+        line_one = info["pomo_label"]
+        line_two = info["pomo_detail"]
 
-    def section(title):
-        nonlocal y
-        # Segoe 无中文字形：中文标题（番茄钟）改用中文字体
-        font = title_font if title.isascii() else _load_font(ZH_FONT, 9 * s, ZH_WEIGHT)
-        _draw_tracked(d, pad_x + font.getlength(title) / 2, y,
-                      title, font, 1 * s, TEXT_DIM)
-        y += 16 * s
+    value_text = "--" if value is None else f"{max(0, min(100, value)):.0f}%"
+    title_font = _load_font(ZH_FONT, 10 * s, ZH_WEIGHT)
+    value_font = _load_font(NUM_FONT, 22 * s)
+    meta_font = _load_font(ZH_FONT, 9 * s, ZH_WEIGHT)
+    d.text((12 * s, 8 * s), title, font=title_font, fill=TEXT_SUB)
+    d.text((12 * s, 25 * s), value_text, font=value_font,
+           fill=TEXT_DIM if value is None else accent)
+    d.text((84 * s, 23 * s), line_one, font=meta_font, fill=TEXT_SUB)
+    d.text((84 * s, 40 * s), line_two, font=meta_font, fill=TEXT_DIM)
 
-    def line(label, value, color=TEXT_SUB):
-        nonlocal y
-        d.text((pad_x, y), label, font=text_font, fill=TEXT_SUB)
-        lw = text_font.getlength(label)
-        # 值拆成数字主体（Segoe）+ 中文后缀（如「（4h10m 后重置）」，中文字体）
-        main, sep, suffix = value.partition("（")
-        if main.isascii():
-            d.text((pad_x + lw + 2 * s, y - 1), main, font=val_font, fill=color)
-            if sep:
-                mw = val_font.getlength(main)
-                d.text((pad_x + lw + 2 * s + mw, y), sep + suffix,
-                       font=text_font, fill=TEXT_DIM)
-        else:  # 值含中文（如「下次开工 13:30」），整体用中文字体
-            d.text((pad_x + lw + 2 * s, y), value, font=text_font, fill=color)
-        y += 18 * s
-
-    def pct_text(v):
-        return "--" if v is None else f"{v:.0f}%"
-
-    def pct_color(v):
-        return TEXT_DIM if v is None else _remaining_color(v)
-
-    section("GLM")
-    line("短期剩余", pct_text(info["glm_remaining"]) + fmt_reset(info["glm_reset_left"]),
-         pct_color(info["glm_remaining"]))
-    line("周额度剩余", pct_text(info["glm_weekly"]), pct_color(info["glm_weekly"]))
-    y += 8 * s
-    section("KIMI")
-    line("短期剩余", pct_text(info["kimi_remaining"]) + fmt_reset(info["kimi_reset_left"]),
-         pct_color(info["kimi_remaining"]))
-    line("月额度剩余", pct_text(info["kimi_monthly"]), pct_color(info["kimi_monthly"]))
-    y += 8 * s
-    section("番茄钟")
-    line(info["pomo_label"], info["pomo_detail"])
-    line("上次刷新", info["last_refresh"])
-
-    return img.resize((PANEL_W, WIDGET_H), Image.LANCZOS)
+    return img.resize((PANEL_W, PANEL_H), Image.LANCZOS)
 
 
 # ── Win32 分层窗口渲染 ────────────────────────────────────────────────
@@ -1109,19 +1068,20 @@ class GLMWidget:
         self._visual_mode = None      # 当前窗口形态 "strip"/"full"（幂等切换用）
         self._panel = None            # 详情面板窗口（lazy 创建）
         self._panel_visible = False
-        self._hover_since = None      # 指针进入卡片的时刻（面板延迟用）
+        self._panel_target = None
+        self._hover_target = None
+        self._hover_since = None      # 指针进入当前项的时刻（面板延迟用）
+        self._panel_leave_since = None
         self._leave_since = None      # 指针离开的时刻（隐藏延迟用）
         self._born = time.time()      # 启动宽限期（BOOT_GRACE 内不自动隐藏）
         self._last_refresh = "--"
 
         # 状态：GLM（短期 Token 剩余 + 周额度剩余 + 短期窗口重置点）+ Kimi + 番茄钟
         self._token_remaining = 100  # 加载态显示满电，API 返回后更新
-        self._weekly_remaining = 100.0  # 周额度剩余比例，GLM 第三竖条
+        self._weekly_remaining = 100.0  # 周额度剩余比例，仅在详情面板呈现
         self._quota_reset_ts = 0.0   # 短期窗口重置时刻（epoch 秒），0 = 尚无数据
-        self._quota_span = 5 * 3600  # 窗口满刻度：初始按 5h，每次拉取按实际跨度上调
         self._kimi_remaining = None  # Kimi 短期剩余；None = 无数据（daemon 未跑）
         self._kimi_reset_ts = 0.0
-        self._kimi_span = 5 * 3600
         self._kimi_monthly_remaining = None  # Kimi 月额度剩余；None = 无数据
         self._pomo = _pomo_state()
         self._dim = 0.0           # 番茄钟闪烁调光系数 0~1（正弦淡出）
@@ -1132,8 +1092,7 @@ class GLMWidget:
         self._targets = {}
         self._animating = False
 
-        # 显示初始状态（先用 PIL 卡片底渲染一帧，再开启 Acrylic——
-        # 分层窗口先建立 UpdateLayeredWindow 渲染通道后叠加模糊才生效）
+        # 主轨先以 PIL 渲染一帧；局部详情卡片另行启用 Acrylic。
         self._glass = False
         self._render()
         self._setup_layered()
@@ -1157,16 +1116,12 @@ class GLMWidget:
 
     # Win32 分层窗口 -----------------------------------------------
     def _setup_layered(self):
-        """将窗口设为分层窗口（WS_EX_LAYERED），并尝试开启 Acrylic 毛玻璃
-        与 DWM 圆角；失败（老系统）时回退 PIL 自绘卡片底"""
+        """建立分层主轨，让自绘 alpha 边缘保留平滑的半圆端帽。"""
         ex = ctypes.windll.user32.GetWindowLongW(self._hwnd, GWL_EXSTYLE)
         ctypes.windll.user32.SetWindowLongW(self._hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
-        self._glass = (_set_acrylic(self._hwnd) and _set_round_corners(
-            self._hwnd, self._win_w, self._win_h))
-        if self._glass:
-            _set_dwm_round(self._hwnd)  # 玻璃底圆角（region 裁不到组合属性底）
-        if not self._glass:
-            print("Acrylic/DWM 圆角不可用，回退 PIL 自绘卡片")
+        self._glass = False
+        _clear_window_region(self._hwnd)
+        _set_dwm_round(self._hwnd, 1)  # 不让系统默认小圆角覆盖自绘胶囊外形
 
     # 拖拽 ----------------------------------------------------------
     def _drag_start(self, event):
@@ -1220,6 +1175,17 @@ class GLMWidget:
         return None, None
 
     # 贴边隐藏 + hover 详情面板 --------------------------------------
+    @staticmethod
+    def _slot_at(local_y):
+        """返回纵向状态轨中被悬停的独立项。"""
+        if local_y < 0 or local_y > WIDGET_H:
+            return None
+        if local_y < SLOT_BREAKS[0]:
+            return SLOT_KEYS[0]
+        if local_y < SLOT_BREAKS[1]:
+            return SLOT_KEYS[1]
+        return SLOT_KEYS[2]
+
     def _poll_hover(self):
         """150ms 轮询指针位置，驱动贴边隐藏与详情面板的状态机"""
         px, py = self.root.winfo_pointerxy()
@@ -1238,10 +1204,12 @@ class GLMWidget:
         # 若不算，1.2s 后会被判「离开」缩边、随后又触发滑出，卡片反复弹跳
         right = sw if x + w >= sw - 24 else x + w
         over_card = x <= px <= right and y <= py <= y + h
+        over_rail = x <= px <= x + w and y <= py <= y + h
+        hover_target = self._slot_at(py - y) if over_rail else None
         over_panel = False
         if self._panel_visible and self._panel:
-            qx = self._panel.winfo_x()
-            over_panel = qx <= px <= qx + PANEL_W and y <= py <= y + h
+            qx, qy = self._panel.winfo_x(), self._panel.winfo_y()
+            over_panel = qx <= px <= qx + PANEL_W and qy <= py <= qy + PANEL_H
 
         if self._hidden:
             # 细边状态：指针触及细边（本屏右缘附近）即滑出。热区严格限制在
@@ -1255,15 +1223,7 @@ class GLMWidget:
         elif not self._dragging:
             if over_card or over_panel:
                 self._leave_since = None
-                if over_card and not self._panel_visible:
-                    if self._hover_since is None:
-                        self._hover_since = now
-                    elif now - self._hover_since >= PANEL_DELAY:
-                        self._show_panel()
             else:
-                self._hover_since = None
-                if self._panel_visible:
-                    self._hide_panel()
                 # 停靠当前屏右缘即自动隐藏：原地缩成细边（region 裁窄 +
                 # 关 Acrylic），窗口不再越出屏缘，邻屏上无残影
                 if x + w >= sw - 24 and now - self._born > BOOT_GRACE:
@@ -1274,6 +1234,30 @@ class GLMWidget:
                         self._hidden = True
                         self._render()  # 先换细边视觉，再滑向边缘
                         self._slide_to(sw - EDGE_STRIP)
+
+            if hover_target:
+                self._panel_leave_since = None
+                if hover_target != self._hover_target:
+                    self._hover_target = hover_target
+                    self._hover_since = now
+                elif self._panel_visible:
+                    if (hover_target != self._panel_target
+                            and now - self._hover_since >= PANEL_SWITCH_DELAY):
+                        self._show_panel(hover_target)
+                elif now - self._hover_since >= PANEL_DELAY:
+                    self._show_panel(hover_target)
+            elif over_panel:
+                self._hover_target = None
+                self._hover_since = None
+                self._panel_leave_since = None
+            else:
+                self._hover_target = None
+                self._hover_since = None
+                if self._panel_visible:
+                    if self._panel_leave_since is None:
+                        self._panel_leave_since = now
+                    elif now - self._panel_leave_since >= PANEL_CLOSE_DELAY:
+                        self._hide_panel()
         self.root.after(150, self._poll_hover)
 
     def _slide_to(self, target_x, steps=10, on_done=None):
@@ -1299,7 +1283,7 @@ class GLMWidget:
         - 细边：region 裁成 EDGE_STRIP 竖条——窗口矩形虽仍为整卡大小，
           region 外不参与命中测试，伸在邻屏上的透明部分不挡鼠标；
           同时关 Acrylic（模糊按 region 生效，开着会在邻屏浮出暗色玻璃块）
-        - 整卡：恢复圆角 region；曾成功开玻璃（_glass）的再重新开启"""
+        - 整卡：清除硬 region，交给分层位图的 alpha 边缘抗锯齿"""
         mode = "strip" if strip else "full"
         if mode == self._visual_mode:
             return
@@ -1314,11 +1298,7 @@ class GLMWidget:
             if self._glass:
                 _unset_acrylic(self._hwnd)
         else:
-            rgn = gdi32.CreateRoundRectRgn(
-                0, 0, self._win_w + 1, self._win_h + 1,
-                CORNER_RADIUS * 2, CORNER_RADIUS * 2)
-            if not user32.SetWindowRgn(ctypes.c_void_p(self._hwnd), rgn, True):
-                gdi32.DeleteObject(rgn)
+            _clear_window_region(self._hwnd)
             if self._glass:
                 _set_acrylic(self._hwnd)
                 _set_dwm_round(self._hwnd)  # 玻璃底圆角：region 裁不到它
@@ -1331,13 +1311,13 @@ class GLMWidget:
         self._render()
 
     def _ensure_panel(self):
-        """惰性创建详情面板窗口（分层窗口 + Acrylic，与主卡片同材质）"""
+        """惰性创建单项详情卡片（分层窗口 + Acrylic）。"""
         if self._panel:
             return
         p = tk.Toplevel(self.root)
         p.overrideredirect(True)
         p.attributes("-topmost", True)
-        p.geometry(f"{PANEL_W}x{self._win_h}+0+0")
+        p.geometry(f"{PANEL_W}x{PANEL_H}+0+0")
         p.update_idletasks()
         hwnd = self._toplevel_hwnd(int(p.winfo_id()))
         ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
@@ -1346,34 +1326,52 @@ class GLMWidget:
         self._panel_hwnd = hwnd
         # 与主卡片相同的顺序约束：先建立 UpdateLayeredWindow 渲染通道，
         # 再叠加 Acrylic / 圆角，否则渲染通道不生效
-        blank = Image.new("RGBA", (PANEL_W, self._win_h), (0, 0, 0, 0))
+        blank = Image.new("RGBA", (PANEL_W, PANEL_H), (0, 0, 0, 0))
         _update_layered_window(hwnd, blank)
         self._panel_glass = _set_acrylic(hwnd) and _set_round_corners(
-            hwnd, PANEL_W, self._win_h)
+            hwnd, PANEL_W, PANEL_H)
         if self._panel_glass:
             _set_dwm_round(hwnd)
         p.withdraw()
 
-    def _show_panel(self):
-        """展开详情面板：从主卡片左缘滑出，z 序压在卡片下方（像是卡片背后长出来）"""
+    def _panel_position(self, target):
+        """将局部详情卡片对齐至对应图标，并限制在当前屏幕可见区。"""
+        card_x, card_y = self.root.winfo_x(), self.root.winfo_y()
+        rect = self._monitor_rect()
+        if not rect:
+            rect = (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        target_x = card_x - PANEL_W - PANEL_GAP
+        if target_x < rect[0] + PANEL_GAP:
+            target_x = card_x + self._win_w + PANEL_GAP
+        target_y = card_y + SLOT_CENTERS[SLOT_KEYS.index(target)] - PANEL_H // 2
+        target_x = max(rect[0] + PANEL_GAP, min(target_x, rect[2] - PANEL_W - PANEL_GAP))
+        target_y = max(rect[1] + PANEL_GAP, min(target_y, rect[3] - PANEL_H - PANEL_GAP))
+        return target_x, target_y
+
+    def _show_panel(self, target):
+        """展开或切换对应项的局部详情卡片。"""
         self._ensure_panel()
+        was_visible = self._panel_visible
+        self._panel_target = target
+        self._panel_visible = True
         self._render_panel()
-        card_x, y = self.root.winfo_x(), self.root.winfo_y()
-        target_x = card_x - PANEL_W - 6
+        target_x, target_y = self._panel_position(target)
         p = self._panel
-        p.geometry(f"+{card_x - 24}+{y}")
+        if was_visible:
+            p.geometry(f"+{target_x}+{target_y}")
+            return
+
+        start_x = self.root.winfo_x() - 18
+        p.geometry(f"+{start_x}+{target_y}")
         p.deiconify()
         # 面板压到主卡片之下，滑出时不遮挡卡片
         ctypes.windll.user32.SetWindowPos(
             ctypes.c_void_p(self._panel_hwnd), ctypes.c_void_p(self._hwnd),
             0, 0, 0, 0, 0x1 | 0x2)  # SWP_NOSIZE | SWP_NOMOVE
-        self._panel_visible = True
-        start_x = card_x - 24
-
-        def step(i, steps=10):
+        def step(i, steps=8):
             t = (i + 1) / steps
             e = 1 - (1 - t) ** 3
-            p.geometry(f"+{round(start_x + (target_x - start_x) * e)}+{y}")
+            p.geometry(f"+{round(start_x + (target_x - start_x) * e)}+{target_y}")
             if i + 1 < steps:
                 self.root.after(16, lambda: step(i + 1))
 
@@ -1381,13 +1379,15 @@ class GLMWidget:
 
     def _hide_panel(self):
         self._panel_visible = False
+        self._panel_target = None
         self._hover_since = None
+        self._panel_leave_since = None
         if self._panel:
             self._panel.withdraw()
 
     def _render_panel(self):
         """重绘详情面板内容（精确数值用目标值而非动画中间值）"""
-        if not self._panel_visible or not self._panel:
+        if not self._panel_visible or not self._panel or not self._panel_target:
             return
         p = self._pomo
         if p["stage"] == "off":
@@ -1406,45 +1406,22 @@ class GLMWidget:
             "kimi_monthly": self._kimi_monthly_remaining,
             "pomo_label": p["label"],
             "pomo_detail": detail,
+            "pomo_progress": p["progress"],
+            "pomo_stage": p["stage"],
             "last_refresh": self._last_refresh,
         }
         _update_layered_window(self._panel_hwnd,
-                               create_detail_image(info, glass=self._panel_glass))
-
-    # 统一渲染（GLM/Kimi 三列 + 番茄钟）--------------------------------
-    @staticmethod
-    def _reset_frac(reset_ts, span):
-        """窗口重置倒计时的剩余比例（满 = 刚重置，空 = 即将重置回满）"""
-        if not reset_ts:
-            return 0
-        left = reset_ts - time.time()
-        return max(0.0, min(1.0, left / span))
-
-    @staticmethod
-    def _reset_pulse(reset_ts):
-        """黄条整分心跳幅度（1→0）：每分钟第 0 秒达峰、6 秒内线性衰减到 0。
-
-        5h 满刻度的位移每分钟仅 0.2px 不可见，用颜色节律代替位移传达「在走」；
-        无重置数据（黄条为空轨道）时不跳。番茄钟闪烁（dim）期间不叠加。"""
-        if not reset_ts:
-            return 0
-        return max(0.0, 1 - datetime.now().second / 6)
+                               create_detail_image(info, self._panel_target,
+                                                   glass=self._panel_glass))
 
     def _render(self):
         disp = self._disp
         glm_view = {
             "remaining": disp.get("glm", self._token_remaining),
-            "reset_frac": self._reset_frac(self._quota_reset_ts, self._quota_span),
-            "pulse": self._reset_pulse(self._quota_reset_ts),
-            "weekly": disp.get("glm_weekly", self._weekly_remaining),
         }
         kimi_view = {
             "remaining": (disp.get("kimi", self._kimi_remaining)
                           if self._kimi_remaining is not None else None),
-            "reset_frac": self._reset_frac(self._kimi_reset_ts, self._kimi_span),
-            "pulse": self._reset_pulse(self._kimi_reset_ts),
-            "monthly": (disp.get("kimi_monthly", self._kimi_monthly_remaining)
-                        if self._kimi_monthly_remaining is not None else None),
         }
         if self._hidden or self._sliding_out:
             img = _create_strip_image(self._pomo["progress"])
@@ -1559,41 +1536,28 @@ class GLMWidget:
         self._schedule()
 
     def _apply_usage(self, result, kimi):
-        """UI 线程应用抓取结果：更新目标值并触发缓动动画与满刻度校准"""
+        """UI 线程应用抓取结果：短期额度平滑过渡，详情值直接更新。"""
         self._last_refresh = datetime.now().strftime("%H:%M:%S")
         if result:
             short_term_pct = result.get("short_term_percentage")
             if short_term_pct is not None:
                 self._token_remaining = min(max(100 - short_term_pct, 0), 100)
                 self._set_targets(glm=self._token_remaining)
-                reset_ts = result.get("short_term_reset_ts", 0)
-                self._quota_reset_ts = reset_ts
-                if reset_ts:
-                    # 满刻度校准：同一窗口内跨度只会递减，取历史最大即窗口刚重置后的值；
-                    # 窗口重置后跨度重新变大，max 自然跟上，无需状态机。
-                    span = reset_ts - time.time()
-                    if span > 0:
-                        self._quota_span = max(self._quota_span, span)
+                self._quota_reset_ts = result.get("short_term_reset_ts", 0)
 
             weekly_pct = result.get("weekly_percentage")
             if weekly_pct is not None:
                 self._weekly_remaining = min(max(100 - weekly_pct, 0), 100)
-                self._set_targets(glm_weekly=self._weekly_remaining)
 
         if kimi:
             self._kimi_remaining = min(
                 max(100 - kimi["short_term_percentage"], 0), 100)
             self._set_targets(kimi=self._kimi_remaining)
             self._kimi_reset_ts = kimi["short_term_reset_ts"]
-            if self._kimi_reset_ts:
-                span = self._kimi_reset_ts - time.time()
-                if span > 0:
-                    self._kimi_span = max(self._kimi_span, span)
             monthly_pct = kimi.get("monthly_percentage")
             if monthly_pct is not None:
                 self._kimi_monthly_remaining = min(
                     max(100 - monthly_pct, 0), 100)
-                self._set_targets(kimi_monthly=self._kimi_monthly_remaining)
         # daemon 不在跑时不清空既有读数；从未有过数据则保持 None（空轨道）
         self._render()
 
