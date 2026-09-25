@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.29
+# GLM Plan Dashboard v1.30
 
 GLM + Kimi + Codex 三源用量悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，GLM 深蓝晶体、Kimi 绿色星芒、Codex 洋红终端符、番茄沙漏四个图标圆环分别显示两类短期额度、Codex 周预算和当前番茄阶段剩余，图标下方显示百分比。拖到任意屏松手就近贴边，空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
 
@@ -70,6 +70,11 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 **开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
 ## 更新日志
+
+### v1.30
+- **修复运行期「静默死亡」**：`after` 回调链（hover 轮询 / 番茄钟秒循环）此前在一轮中途抛异常即永久中断——hover、贴边滑出、详情面板全部失灵但拖拽仍可用，且无任何日志；现拆出单轮实现，外层 try/except 记日志 + finally 照常续跑，单轮异常不再拖死整条链
+- **日志常开**：stdout/stderr 改由 `_Tee` 同时扇出到原输出与 `dashboard.log`，写入永不抛异常；此前仅在 `sys.stdout is None`（pythonw 无窗口）时接管日志，终端启动场景下管道失效后 `print` 抛 `BrokenPipeError` 还会杀死抓取线程，对应数据源（如 Kimi）永远停在初始值
+- **抓取线程兜底**：`_do_refresh` 的拉取线程加异常捕获，fetch 抛错也正常走 `apply(None)` 落地流程，不再静默丢失该轮刷新
 
 ### v1.29
 - **左右双缘贴边**：贴边隐藏从右缘专属扩展为左/右对称——卡片左/右缘进入所在屏对应竖边 24px 内即视为停靠（两边都够到取更近者），空闲滑入该侧；细边唤出热区、region 裁剪、所在屏判定锚点、hover 详情面板展开方向（左停靠向右展开）全部随停靠侧镜像；跨屏拖动照常生效（边沿按窗口所在屏判定）；停靠侧与位置一并记忆于 `ui_state.json`（旧文件无 `side` 字段按右停靠兼容）
