@@ -16,6 +16,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 import tkinter as tk
 import winreg
 from datetime import datetime, time as dtime
@@ -28,13 +29,38 @@ from PIL import Image, ImageChops, ImageDraw, ImageFont
 from winotify import Notification
 
 # pythonw 在无控制台环境（任务计划程序 / 开机自启）下 sys.stdout/stderr 为 None，
-# 此时 print() 会抛 AttributeError 导致进程崩溃；重定向到项目内 dashboard.log，
-# 既规避崩溃，又保留运行期日志（API 错误 / 未捕获异常 traceback）便于故障定位。
+# 此时 print() 会抛 AttributeError 导致进程崩溃；从终端启动时又可能因终端关闭
+# 使管道失效（BrokenPipeError）。统一以 Tee 同时写 dashboard.log 与原输出，
+# 写入永不抛异常，保证任何启动方式下运行期日志（API 错误 / 异常 traceback）
+# 都完整落盘，便于故障定位。
 _LOG_PATH = Path(__file__).resolve().parent / "dashboard.log"
-if sys.stdout is None:
-    sys.stdout = open(_LOG_PATH, "a", encoding="utf-8")
-if sys.stderr is None:
-    sys.stderr = open(_LOG_PATH, "a", encoding="utf-8")
+
+
+class _Tee:
+    """把 write 扇出到多个流，单个流失效不影响其余、也不向上抛异常。"""
+
+    def __init__(self, *streams):
+        self._streams = [s for s in streams if s is not None]
+
+    def write(self, data):
+        for s in self._streams:
+            try:
+                s.write(data)
+            except Exception:
+                pass
+        return len(data)
+
+    def flush(self):
+        for s in self._streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+
+_log_file = open(_LOG_PATH, "a", encoding="utf-8", buffering=1)  # 行缓冲
+sys.stdout = _Tee(sys.stdout, _log_file)
+sys.stderr = _Tee(sys.stderr, _log_file)
 
 REFRESH_INTERVAL = 300  # Token 刷新：5 分钟
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -1414,7 +1440,18 @@ class GLMWidget:
         return SLOT_KEYS[-1]
 
     def _poll_hover(self):
-        """150ms 轮询指针位置，驱动贴边隐藏与详情面板的状态机"""
+        """150ms 轮询驱动贴边隐藏与详情面板的状态机（自愈：任何一轮异常
+        只记日志，链条照常续跑——此前回调里一处未捕获异常就会让整条
+        after 链永久中断，hover/贴边全部失灵且无任何痕迹）"""
+        try:
+            self._poll_hover_once()
+        except Exception:
+            traceback.print_exc()
+        finally:
+            self.root.after(150, self._poll_hover)
+
+    def _poll_hover_once(self):
+        """单轮 hover 状态机（调度由 _poll_hover 负责）"""
         px, py = self.root.winfo_pointerxy()
         x, y = self.root.winfo_x(), self.root.winfo_y()
         w, h = self._win_w, self._win_h
@@ -1502,7 +1539,6 @@ class GLMWidget:
                         self._panel_leave_since = now
                     elif now - self._panel_leave_since >= PANEL_CLOSE_DELAY:
                         self._hide_panel()
-        self.root.after(150, self._poll_hover)
 
     def _slide_to(self, target_x, steps=10, on_done=None):
         """水平滑动到目标 x（ease-out cubic），贴边滑入/滑出与面板共用；
@@ -1766,13 +1802,21 @@ class GLMWidget:
 
     # 番茄钟 -------------------------------------------------------
     def _pomo_tick(self):
+        """番茄钟每秒循环（自愈守护，同 _poll_hover）"""
+        try:
+            self._pomo_tick_once()
+        except Exception:
+            traceback.print_exc()
+        finally:
+            self.root.after(1000, self._pomo_tick)
+
+    def _pomo_tick_once(self):
         """每秒从墙钟推导番茄钟状态；阶段跃迁（工作↔休息、时段开关）时通知+闪烁"""
         old, self._pomo = self._pomo, _pomo_state()
         if old["stage"] != self._pomo["stage"]:
             self._on_stage_edge(old, self._pomo)
             self._start_blink()
         self._render()
-        self.root.after(1000, self._pomo_tick)
 
     def _on_stage_edge(self, old, new):
         """阶段跃迁沿的通知分发（每条沿只触发一次，启动首帧不通知）"""
@@ -1813,7 +1857,13 @@ class GLMWidget:
         推迟其余源的 UI 更新（旧实现顺序 fetch，Codex 慢会拖住 GLM/Kimi）。"""
         def _spawn(fetch, apply):
             def run():
-                result = fetch()
+                try:
+                    result = fetch()
+                except Exception:
+                    # 抓取线程里的未捕获异常（如向已失效的管道 print）不能杀死
+                    # 该源的落地回调，否则对应数据源永远停在初始值
+                    traceback.print_exc()
+                    result = None
                 self.root.after(0, lambda: apply(result))
             threading.Thread(target=run, daemon=True).start()
 
