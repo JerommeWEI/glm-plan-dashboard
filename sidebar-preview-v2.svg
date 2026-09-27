@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620">
+  <rect width="1000" height="620" fill="#121419"/>
+  <path d="M0 0H1000V112L706 0Z" fill="#1b1e25"/>
+  <path d="M0 430L562 164L1000 370V620H0Z" fill="#181b21"/>
+  <path d="M0 560L605 272L1000 460V620H0Z" fill="#101216"/>
+  <path d="M0 430L562 164L1000 370" fill="none" stroke="#313641" stroke-width="2"/>
+  <g fill="#3a3f49" opacity=".28">
+    <circle cx="84" cy="106" r="2"/><circle cx="108" cy="106" r="2"/><circle cx="132" cy="106" r="2"/><circle cx="156" cy="106" r="2"/>
+    <circle cx="84" cy="130" r="2"/><circle cx="108" cy="130" r="2"/><circle cx="132" cy="130" r="2"/><circle cx="156" cy="130" r="2"/>
+    <circle cx="84" cy="154" r="2"/><circle cx="108" cy="154" r="2"/><circle cx="132" cy="154" r="2"/><circle cx="156" cy="154" r="2"/>
+  </g>
+
+  <g font-family="Microsoft YaHei, Segoe UI, sans-serif">
+    <rect x="460" y="90" width="332" height="140" rx="16" fill="#202228" stroke="#ffffff" stroke-opacity=".11"/>
+    <path d="M792 156H824" stroke="#285fae" stroke-opacity=".52" stroke-width="2"/>
+    <text x="488" y="124" font-size="15" font-weight="700" fill="#f3f4f6">GLM 用量</text>
+    <text x="488" y="176" font-size="42" font-weight="700" fill="#eef4ff">68%</text>
+    <text x="602" y="154" font-size="14" fill="#b3bac7">5 小时窗口</text>
+    <text x="602" y="179" font-size="17" font-weight="700" fill="#79a8ee">剩余 3h 24m</text>
+    <path d="M488 198H764" stroke="#ffffff" stroke-opacity=".09"/>
+    <text x="488" y="217" font-size="13" fill="#8e95a3">下次重置  18:42</text>
+
+    <rect x="836" y="70" width="112" height="464" rx="20" fill="#15171b" stroke="#ffffff" stroke-opacity=".12"/>
+    <path d="M860 73H924" stroke="#ffffff" stroke-opacity=".15" stroke-width="2"/>
+    <path d="M858 238H926M858 380H926" stroke="#ffffff" stroke-opacity=".10"/>
+
+    <g transform="rotate(-90 892 158)">
+      <circle cx="892" cy="158" r="36" fill="none" stroke="#2a2d34" stroke-width="8"/>
+      <circle cx="892" cy="158" r="36" fill="none" stroke="#285fae" stroke-width="8" stroke-linecap="round" stroke-dasharray="154 226"/>
+    </g>
+    <path d="M892 139L909 158L892 177L875 158Z" fill="#1f66bd"/>
+    <path d="M892 144L903 158L892 172L881 158Z" fill="#64a0ef"/>
+    <path d="M892 144V172M881 158H903" stroke="#d9ebff" stroke-opacity=".72" stroke-width="2"/>
+
+    <g transform="rotate(-90 892 300)">
+      <circle cx="892" cy="300" r="36" fill="none" stroke="#2a2d34" stroke-width="8"/>
+      <circle cx="892" cy="300" r="36" fill="none" stroke="#36b774" stroke-width="8" stroke-linecap="round" stroke-dasharray="92 226"/>
+    </g>
+    <path d="M892 280L897 291L909 290L900 299L904 311L892 305L880 311L884 299L875 290L887 291Z" fill="#45c97e"/>
+    <circle cx="892" cy="299" r="5" fill="#d6ffe4"/>
+
+    <g transform="rotate(-90 892 442)">
+      <circle cx="892" cy="442" r="36" fill="none" stroke="#2a2d34" stroke-width="8"/>
+      <circle cx="892" cy="442" r="36" fill="none" stroke="#df8267" stroke-width="8" stroke-linecap="round" stroke-dasharray="128 226"/>
+    </g>
+    <path d="M881 426H903M881 458H903M883 427C883 435 888 437 892 442C896 447 901 449 901 457M901 427C901 435 896 437 892 442C888 447 883 449 883 457" fill="none" stroke="#ff9b80" stroke-width="3" stroke-linecap="round"/>
+    <path d="M887 453H897" stroke="#ffb19d" stroke-width="3" stroke-linecap="round"/>
+
+  </g>
+</svg>

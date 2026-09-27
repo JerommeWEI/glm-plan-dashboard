@@ -1,0 +1,476 @@
+dsh: reasoning:
+The user wants a technical review of 5 points about adding a 4th slot for Codex usage to a Windows desktop floating status widget. This is a design/architecture review question in Chinese. I should give concrete, prioritized recommendations, concise.
+
+Let me think carefully about each point. No need for tools really — this is an analysis task. Maybe I should check if there's existing code in the workspace? The working directory is a temp dir. The user says "现有" widget — maybe the code is somewhere. But the request is a review request, and they didn't ask me to modify code. Let me quickly check if there's relevant code in the workspace to ground my review. Actually, the workspace is Temp — likely nothing. Let me do a quick check to be safe; but it may be a waste. A quick glob for *.py might help ground answers about existing GLM URL validation etc. Let me do that quickly.
+
+Actually let me just check briefly.
+
+Then write the review.
+
+Let me think through the technical content deeply.
+
+**1) 圆环语义 (ring semantics)**
+
+Existing semantics: "剩余递减" — ring shows remaining %, so as quota is consumed the ring shrinks (or maybe shrinks toward empty). GLM 5h and Kimi 5h are token/request quotas with a 5h window; pomodoro phase remaining. So ring = remaining fraction, fills down.
+
+For Codex: weekly_limit_usd=300, weekly_usage_usd=15.6 → remaining = 94.8%. Aligning to "remaining decreasing" is consistent, good. But considerations:
+
+- Consistency is valuable for a glanceable widget: same visual grammar = same meaning. So yes, weekly remaining ratio is the right primary ring. BUT: the time base differs. GLM/Kimi 5h windows are short — remaining drops fast and resets often; users read them as "how much left right now". Codex weekly is a slow-moving, monotonic-decreasing budget. A 94.8% remaining ring will look almost full for most of the week and the ring conveys little dynamic info — the visual channel is wasted. Worse, a nearly-full ring next to nearly-empty GLM/Kimi rings could be misread as "Codex has plenty, everything fine" — which is true but low-information.
+
+- Key semantic difference: for a 5h window, the naive "remaining" is comparable across time. For a weekly window, the informative quantity is **burn rate vs. elapsed window time** — i.e., are you on pace? remaining% alone doesn't tell you whether 94.8% left with 6 days remaining is good or bad. Actually 94.8% used with 6 days left is way ahead of pace (over-consuming).
+
+So my recommendation: keep the ring = weekly remaining ratio (aligns with existing grammar, one-glance comparability, and avoids inventing a new visual language), but add a **pace reference tick** on the ring: a small radial mark at the position corresponding to "elapsed fraction of the weekly window", or equivalently "ideal remaining if linear burn". Then ring vs tick reads as ahead/behind pace without changing the base semantics. That's a cheap, high-value addition: 1-2 px tick at the arc angle for elapsed%. If remaining arc > tick → under-pace (good); if below → over-pace (warn). Color the tick neutral gray so it doesn't collide with the alert palette. This solves the "wasted dynamic range / misleading nearly-full ring" problem with no new encoding to learn.
+
+Alternative if they don't want the tick: normalize the ring against the expected linear burn (ring = min(1, elapsed_frac/used_frac)) — but that breaks cross-slot consistency and is harder to read. Don't do that as the primary. Keep raw remaining as the ring, pace as the secondary tick.
+
+- Also caution: weekly_limit_usd could be 0 or missing in some subscription tiers → guard division by zero; treat as unknown → dashed empty ring (matching existing degraded state).
+
+**daily_limit_usd=0 and mode=unrestricted**: The data says daily_limit=0 meaning no daily cap, and mode=unrestricted means no restrictions at all. So daily quota is not a meaningful "remaining" quantity. Options:
+
+(a) Don't draw anything for daily — but then what happens on hover? You'd lose the fact that daily has no cap; user may misread absence as failure.
+(b) "∞" marker — good for hover card text, bad in a 44px widget and confusing at 12px.
+(c) Use today's cost as a fill against... what denominator? There is no denominator. Drawing today-cost as a ring would fake a ratio — this violates the project's own rule "拉取失败降级为虚线空环不伪造读数" in spirit (fabricating a normalized reading from a non-normalized quantity).
+
+Recommendation: **daily is not a ring slot at all.** Weekly is the ring (the only quantity with a real denominator). Express daily as *absolute* text, not a ratio: in hover card show `今日 $3.20 / 无日限额 (unrestricted)`, and optionally a small caption. If the widget has room for a secondary micro-indicator, use a **non-ratio** encoding for daily (e.g., a thin horizontal bar whose fill length is normalized against a *user-configured* reference budget, clearly marked as a personal reference rather than a provider cap; or just a 2-value text). Rule of thumb: **never render a ratio ring for a quantity whose denominator is 0/absent** — that's a fabricated reading. So: ring = weekly only; daily = absolute number in detail card; when daily_limit_usd>0 and mode != unrestricted, *then* add a second ring or a segmented inner arc for daily (i.e., feature-detect, don't hardcode). This gives forward-compatibility: the code path handles a real daily limit if the provider ever starts returning one.
+
+Also mode: unrestricted means enforcement is off; usage is informational. Add a subtle "unrestricted" badge/tooltip? At 12px probably just text in the card. Maybe render the ring stroke slightly thinner / lower opacity to signal "informational, not enforced"? That's an optional nicety — could be confused with the degraded dashed state, so I'd avoid changing the ring style for mode; instead put a tiny dot or just text in the card. Actually a subtle desaturated stroke for "not enforced" risks collision with failure state. Recommend: keep ring style identical; put mode in card text only.
+
+**2) 周重置时刻推算**
+
+weekly_window_start = 本週一 00:00 本地时区; reset = start + 7d. Risks:
+
+- **Timezone / DST**: If window_start carries an offset (+08:00) and local tz is the same, adding 7 days to the *absolute instant* is fine. But if you add 7 days to the *wall-clock local time* and the local tz observes DST (or the machine's tz differs from the offset in the string), you can land 1 hour off — practically irrelevant for a countdown to quota reset, but if you display "重置时间 09-28 00:00" it could show 23:00/01:00. Best practice: parse to aware datetime (`datetime.fromisoformat` in 3.11+ handles the offset), compute `reset = window_start + timedelta(days=7)` in absolute terms, and **display in the tz of the window_start offset** (or localize explicitly) rather than assuming machine-local. Python 3.11 `fromisoformat` handles `+08:00` fine. Store the tzinfo, don't strip it.
+
+- **Server semantics unknown**: you're inferring the reset rule from one sample. Possible that the provider resets at a different anchor (calendar week vs. rolling 7d vs. account-creation anniversary), that window_start is only updated on the first request of the cycle, or that the field is the *last* window start (not the current one). If the server computes the window lazily, window_start could be up to one polling interval stale — plus your own 5-minute polling adds skew. So the derived reset time can be up to 5+ minutes wrong, which is fine, but do not treat "now > reset" as authoritative to zero the ring locally.
+
+- **Failure mode**: after the reset instant passes but before the next successful poll returns a new window_start, the widget would show "0 remaining / negative remaining" or a stale reading. Guard: clamp remaining to [0,1]; and when `now >= derived_reset`, mark the reading as **stale/pending-refresh** (e.g., dashed ring or a subtle "刷新中" state) rather than showing 0% — showing 0% at that boundary is exactly the kind of "伪造读数" to avoid. Actually careful: if the user really did burn it all, 0 is real. So distinguish: if derived reset passed and data still shows old window_start, show the last known value with a "已过重置点，待刷新" hint; don't fabricate 100%.
+
+- **Validation of window_start**: sanity-check that window_start is not in the future and not more than 7 (or 8) days in the past; if it is, trust the server's start for display but don't derive reset (show "—"). Also check window_start + 7d > now (i.e., current window); if not, the data is stale.
+
+- **更稳妥的做法**: (i) prefer any server-provided reset/expires field if it exists (`expires_at` exists but it's 2027-05 = subscription expiry, not the weekly window — don't confuse them; be careful, someone might bind expires_at to the ring by mistake). (ii) Explicitly compute using the offset from the string and keep it tz-aware. (iii) Anchor the countdown to the *next* reset by using `<` comparisons against `now` in UTC, not local naive. (iv) Treat the derived value as a *cosmetic hint only* — never use it to set the ring to 100%; the ring always comes from the server's numbers. (v) Log / record the previous window_start so a change unambiguously signals a new cycle (compare window_start across polls; when it changes → animate the ring refill). (vi) Optional: instead of a countdown to reset, display "本周期已过 X%" derived the same way — same risk, less precision pressure.
+
+Actually a cleaner more robust approach: don't display an exact reset timestamp; display **relative remaining time** ("6天4小时") and let the freshness of that be tolerant. And to know the new cycle started, rely on window_start change, not on the clock crossing. That's the key robustness principle: **derive time for display, but detect state change from server data, not from local clock.**
+
+**3) 配置解析健壮性**
+
+- tomllib in 3.11+ is fine, read-only, no deps. But: file may be locked/being written by Codex CLI (write-then-rename is typical so read is atomic-ish; but a partial read is possible). Handle: open with `rb`, catch `tomllib.TOMLDecodeError`, `OSError`, `PermissionError`; retry once after a short delay on decode error. Also `~/.codex` path: use `Path.home()/".codex"` but honor `$CODEX_HOME` if set (Codex CLI supports CODEX_HOME). Also consider Windows `%USERPROFILE%`; Path.home() is fine.
+
+- Config schema: `[model_providers.OpenAI]` — note TOML keys are case-sensitive and the provider name is a dynamic key. Don't hardcode "OpenAI"; the user's actual current provider may be selected via `model_provider = "OpenAI"` at top level. Robust approach: read top-level `model_provider`, then look up `model_providers[<name>]`, and only fall back to scanning all providers for one whose base_url looks like the relay / matches a configured host. But careful: don't pick an arbitrary provider. Better: prefer explicit config from the widget itself (see below) — that's the most robust.
+
+- **Strong recommendation**: don't make the widget depend on Codex CLI's config at all as the primary source. The widget is a separate app; coupling to a third-party CLI's internal file layout and auth.json field names is brittle (fields get renamed/rotated; auth.json may switch to OAuth token storage, may contain `tokens` instead of `OPENAI_API_KEY`, etc.). Layer the config:
+  1. Widget's own config (e.g. `%APPDATA%\widget\config.json` or a `[codex]` section): explicit base_url + api_key (or api_key_env / api_key_file).
+  2. Environment: `UAPI_API_KEY` / `OPENAI_API_KEY` / `CODEX_API_KEY`.
+  3. Codex CLI files as a convenience fallback (tomllib config.toml + auth.json).
+  This gives you a stable contract you control and still works out of the box.
+
+- auth.json: read as JSON, `OPENAI_API_KEY` at top level (verify actual nesting; could be under a different key). Handle missing file, invalid JSON, key present but empty/whitespace, key with surrounding quotes, or `Bearer ` already included. Strip and check prefix. Never log the key; redact in any error message (`sk-...abcd` → `sk-****abcd`). Store the file in the widget's own memory only; do not write it back anywhere. Permission note: on Windows, treat as ACL-protected rather than chmod.
+
+- Also: key may rotate while the widget runs → re-read auth.json on 401/403 once before giving up, and also refresh periodically (e.g., every poll or every N polls / on file mtime change). Cache by mtime to avoid reading every 5 min unnecessarily — cheap either way.
+
+- **降级链 (degradation chain)** with distinct, honest states — this is the core of the review. Reuse the existing "虚线空环" for all of them but distinguish in the hover card and optionally a status dot:
+  1. No config at all (no base_url or no key) → ring dashed empty, card "未配置 Codex 用量源". Never attempt network.
+  2. Config ok, but network unreachable/timeout → dashed, card "网络不可达 (超时 8s)", keep last-good value? Decide: show last-good value with a staleness marker OR dashed. Recommend: **show last-known reading with a stale indicator (e.g., dimmed ring + small "!" ) up to a TTL (say 3 polling intervals / 30 min), then fall back to dashed.** Actually the project rule says failure → dashed empty, don't fake. The nuance: showing a *clearly marked stale* last value isn't faking; showing it as current is. Given the existing rule, safest consistent choice: dashed empty on any failed poll, but keep the last-good numbers in the hover card labeled "上次成功 HH:MM: $x". That respects "不伪造读数" while not losing information. I'll recommend that. And on stale last-good, if you want a middle state, use a *dimmed solid ring* (not dashed) to mean "stale, unconfirmed" — visually distinct from dashed = "no data". Recommend defining a 3-state visual grammar explicitly: solid = fresh, dimmed solid = stale-but-last-known, dashed empty = unknown/no data. This is a genuine improvement for the 4-slot case.
+  3. 401/403 (key invalid/expired/revoked) → dashed + card "密钥无效/已过期 (401)"; trigger auth.json re-read once; do not retry in a tight loop; back off (e.g., don't retry auth for 30 min, keep polling but expect fail) — actually mark as permanent-ish and surface clearly since it needs user action.
+  4. 404/501 (endpoint not present) → dashed + "中转站不支持 /v1/usage"; this is a distinctly different fix (change base_url) than 401.
+  5. 200 but schema unexpected (missing weekly_limit_usd, non-numeric, limit<=0) → dashed + "用量数据不可解析"; never partially render a fake ring.
+  6. 429 → dashed + backoff (respect Retry-After, exponential up to e.g. 15 min).
+  
+  Important: **all four slots must degrade independently.** A Codex failure must not blank or delay the GLM/Kimi/pomodoro slots. Implies per-source worker threads/tasks with independent timeouts (e.g., 8–10 s) and independent backoff; a single shared 5-min scheduler tick that fans out is fine, but the UI update must be per-slot and must not block the Tk main loop. Also: **Tkinter thread-safety** — never touch widgets from a worker thread; marshal results via `root.after(0, ...)` or a queue polled by `after`. This is worth calling out because adding a 4th network source multiplies the temptation to update from threads.
+
+- URL 安全校验: reuse the existing GLM policy, extended:
+  - Require scheme https (allow http only for explicit localhost dev override? No — keep https-only).
+  - Parse with `urllib.parse.urlsplit`; reject credentials in netloc (`user:pass@`), reject non-default weird ports? Ports: allow 443 and maybe explicit port; reject others unless in an allowlist.
+  - Host allowlist: this is the crux. The relay host is user-configurable, so a static whitelist is impossible in general. Two-tier policy: (a) default allowlist containing known-good hosts (uapi.ccwu.cc etc.) plus a user-maintained allowlist in widget config; (b) for hosts outside it, require the user to explicitly trust the host once (store fingerprint) rather than silently fetching. That's the safe generalization of "域名白名单".
+  - **SSRF/私网阻断 is essential and must be done on the *resolved IP*, not just the hostname** — because `base_url` comes from a config file. Resolve with `socket.getaddrinfo`, check every returned address against private/reserved/link-local/loopback/multicast ranges using `ipaddress.ip_address(ip).is_private / is_loopback / is_link_local / is_reserved / is_multicast` (note: `is_global` in 3.11+ is a convenient single check — but it can be conservative; use it plus explicit checks). Then **pin the connection to the validated IP** to avoid DNS rebinding (TOCTOU): the safest is to connect to the IP while sending Host/SNI for the hostname — with `requests`/`urllib` this is awkward; practical mitigations: re-validate on each request, use a short DNS cache, and/or use a custom `HTTPConnection` that connects to the validated IP. Also block redirects (or validate each redirect hop's URL+IP — use `allow_redirects=False` and handle manually). This matters because the existing GLM policy already blocks private IPs and the new source is user-configurable → higher risk.
+  - Also reject anything but the expected path: construct `{base}/v1/usage` carefully — don't let base_url contain a query/fragment; strip trailing slash; use `urljoin` carefully (urljoin with a base path can surprise) — prefer explicit string join after validating base has no query/fragment. Reject `base_url` ending in a path that would change semantics? Just build `urlsplit(base)._replace(path=base_path.rstrip('/') + '/v1/usage', query='', fragment='')`.
+  - Timeout must be set (connect+read, e.g. (5, 10)), `stream=False`, and cap response size (read at most e.g. 1 MiB) to avoid a hostile relay feeding a huge body.
+  - Cert verification on (default). Don't add `verify=False`.
+  - Never send the API key to a redirect target on a different host.
+
+**4) 布局**
+
+44×232 for 3 slots. That's 232/3 ≈ 77.3 px per slot. If you keep the same per-slot pitch, 4 slots ≈ 309 px; user says ~307 — consistent (maybe accounting for padding). 
+
+Is it合理? Considerations:
+- 307px on a typical 1080p screen (1920×1080) is 28% of screen height; on a 768px-tall laptop it's 40% — still fits but starts to feel like a bar. The widget is a floating capsule; going taller increases occlusion and the travel distance for hover.
+- Vertical pitch 77px per slot is quite generous for a 12px icon + a percentage number. There's room to compress: icon ring maybe 24–28px, percent text ~9px → a slot can be ~48–56px without crowding. 4 × 56 = 224px → **fits in the existing 232px height with zero layout change.** That's the best option if the visual density is acceptable: keep the 44×232 footprint (no window resize math, no repositioning on screen, no re-anchoring logic, no regression to the other 3 slots), and reduce inter-slot padding/ring size slightly.
+- Between the extremes: a middle ground at ~264–276px (pitch ~64) keeps proportions close to current while adding the slot.
+- **Grouping** is the other good idea: the 3 existing slots are all *time-boxed short quotas* (GLM 5h, Kimi 5h, pomodoro = "current session / now"); Codex is a *long-horizon weekly budget*. They are semantically different classes. Grouping with a thin 1px separator / slightly larger gap between the "now" group and the "cycle" group would improve scannability and would justify a slightly taller capsule. Recommend: if you do grow, grow to ~264–280 and insert an 8–10px group divider rather than uniform spacing. Visual grouping also reduces the risk of the Codex near-full ring being misread as "same class as the 5h rings".
+- Also consider: DPI awareness. 44px and these heights are in logical pixels; on 125%/150% Windows scaling tkinter will render differently unless the app is per-monitor DPI aware. Growing the window increases the chance of off-screen/clipping at high scaling on small screens. So: prefer not to grow; if you grow, clamp window height to work area and re-anchor to the nearest screen edge. Also add a small top/bottom padding so the capsule doesn't touch the screen edge.
+- Another option: **make slot count/layout configurable** and/or allow collapsing the Codex slot into a compact "chip" (icon + tiny bar) rather than a full ring, if height is constrained. But consistency argues for a full slot.
+- Bottom line recommendation: **Option A (preferred): keep 44×232, compress pitch to ~56–58px, shrink ring to ~26–28px.** If legibility testing shows crowding, Option B: grow to ~272px with a group divider and DPI-aware clamping. Avoid 307px uniform — it wastes vertical space and raises occlusion/DPI issues for little benefit.
+
+Wait — but the percentage numbers need to remain legible. 44px wide, number like "95%" at maybe 10px font fits. At 4 slots in 232px with ~56px pitch: icon ring 28px + 3px gap + text 11px = 42px content, 14px gap. Fine.
+
+**5) 图标**
+
+OpenAI 六瓣花结 (six-petal knot / the OpenAI logo) at 12px, drawn as "six overlapping circles + center-hole mask".
+
+Analysis: The OpenAI mark is a 6-fold rotationally symmetric interlocking knot, not six separate circles. At 12px it's ~12×12 px. Problems:
+- 12px has no room for interlocking detail. Six circles of radius r arranged on a ring of radius R: for the petals to be distinguishable, adjacent circles must have visible separation or clear overlap structure. At 12px canvas, if you scale so overall = 12px, each "petal" is ~4–5px across, and the gaps between petals are sub-pixel. The center hole mask further erodes each petal from the inside. Result: it reads as a **blob/asterisk**, and worse, overlapping filled circles won't show the *interlock* (the mark's defining feature is the woven/over-under structure) — it will look like a flower/asterisk, not the OpenAI knot.
+- Anti-aliasing at that size will smear the 1px-looking strokes. If you draw *stroked* (outline) circles rather than filled, at 12px stroke width would need to be ~1px, which aliases badly and overlaps into mush.
+- Also: the center-hole mask requires the six circles to be large enough that a hole is meaningful; at 12px a center hole is ~3px, which just looks like a dot/defect.
+
+Recommendation: at 12px, **don't draw the knot geometrically**. Options ranked:
+1. **Pre-render a hand-tuned bitmap/vector at 1× and 2× (i.e., 12px and 24px) with manual pixel-hinting** — use PIL to draw at 4× or 8× (e.g., 96px) with proper stroked paths (ideally the official SVG path, which is a single continuous path, not six circles) and then downsample with LANCZOS to 24px and 12px. Supersample-then-downsample preserves more structure than direct geometry. Then hand-check the 12px result; if unreadable, use the 24px asset scaled — actually if 12px is unreadable, the right fix is to **give the icon more room** (this ties back to layout: don't shrink the ring too far) or use a simplified mark.
+2. **Use a simplified, legible-at-12px derivative**: e.g., a 6-fold rosette (six short strokes radiating from a ring) or the OpenAI *wordmark-free* simplified petal. Actually the most reliable simplification: draw the knot's outer silhouette as six thick arcs forming a hexagonal rosette, no interlock, no center mask. That reads as "the OpenAI-ish flower" at 12px and matches the other slots' flat icon style.
+3. If they insist on the real mark, draw the **official single-path SVG outline** at 8× supersample with strokes, then downsample. Don't build from boolean circle unions — you'll never get the interlock.
+
+Concretely on "六个圆叠加+中心打孔蒙版": that construction produces the *rosette silhouette*, not the mark. It can be acceptable as a *stylized* icon IF: (a) circles are stroked with a **gap** so petals read as separate, not filled-overlapping (filled overlaps merge into a blob); (b) you **drop the center mask** at 12px (it only hurts); (c) you supersample. And be honest with yourself: this is a stylized flower, not the OpenAI logo — that's usually fine for a personal widget, and avoids trademark-precision issues too.
+
+Also **optical weight**: the existing three icons are presumably simple glyphs. A dense 6-petal mark at 12px will look darker/heavier than a simple glyph — match the stroke weight/ink coverage so the four rings look like a set. Test by rendering all four at 12px side by side and squinting / checking at 100% on the target display (not zoomed).
+
+Trademark note: using the OpenAI mark in a personal widget is fine; redistributing is a different matter — a stylized rosette sidesteps it.
+
+**配色**: existing palette: GLM 深蓝, Kimi 绿, 番茄紫/teal, 告警橙红黄. Need a hue that is: distinguishable from all of those, and NOT confusable with the alert palette. 
+
+- Avoid orange/red/yellow (alert), avoid blue (GLM), green (Kimi), purple (pomodoro), teal (pomodoro/adjacent to green). 
+- Candidates: **cyan/light-blue** (too close to GLM blue/teal), **magenta/pink** (close to purple but distinguishable if pomodoro is violet — magenta #E0A0FF vs magenta #FF7AC6 is risky), **white/silver neutral** (very safe — but it's the "no color" option and might read as disabled), **slate/graphite** (too close to the dark capsule background), **amber** (alert collision).
+- Best pick: I'd go with **a desaturated warm off-white / "platinum" (#D8DEE9-ish) or a distinctly lighter azure-cyan**? Let me think about hue wheel coverage. Occupied: blue (~220°), green (~140°), purple (~280°), teal (~175°), alerts (orange ~30°, red 0°, yellow 55°). Unoccupied windows: roughly 300–330° magenta/pink, and ~190° is between teal/blue (crowded). So magenta/pink around **320°** (e.g., #E45C9F / #FF6FB5) is the cleanest unoccupied hue, provided pomodoro purple is clearly on the violet side (270–290°) and not pink.
+- Alternatively a **neutral light gray (#C9D1D9)** reads as "informational/unrestricted" and is maximally distinct from every accent — and it happens to pair semantically with mode=unrestricted. That's elegant: Codex uses a neutral/platinum accent because its quota isn't enforced. But neutral risks looking disabled, and if it's the only neutral slot it may read as "failed/no data" — which collides with the dashed-empty state. Hmm. So if you define dashed-empty as the failure signal, a neutral *solid* ring is still distinguishable by fill style. Slight risk. 
+- Recommendation: **magenta/pink at ~320°, e.g. #E0569E or #F06CA8**, kept clearly distinct from the pomodoro violet (push pomodoro to ~265° indigo-violet if needed). Verify with a **colorblindness check** (protan/deutan): pink vs. purple vs. orange can converge for deutan. Since the widget also has position + text label, hue alone isn't the only channel — that's the real safeguard: **never rely on hue alone**; the four slots are positionally fixed and labeled by the percentage/letters, so a colorblind user still distinguishes them. But to be safe, pick a magenta with a good lightness contrast against the dark capsule and check it against the alert orange under simulated deuteranopia; if they converge, shift toward **cyan-white** or **neutral**. Also ensure the ring colors have adequate contrast ratio vs. the dark capsule background (aim ≥ 3:1 for the ring stroke, ideally the stroke uses the accent but the *track* is a low-alpha version of the same hue as already done presumably).
+- Also: **reserve the accent for the "healthy" state**; when Codex over-paces, the ring should shift toward the alert palette (orange/red), meaning the accent must be distinguishable from the alert color *at the moment of change*. If Codex's normal color is orange-ish that's impossible. So magenta/neutral is good; amber is disqualified.
+
+Also mention: add a tiny per-slot identity letter/label? At 44px width you can't fit text labels, so icons + ring color are the identity. Given 12px icons are all similar-in-weight circles, **hue becomes the primary identity channel** — which makes point 5 (color) more important than it looks, and argues for the group divider and for keeping the icons as distinct in silhouette as possible (Codex = 6-fold/rosette silhouette is actually good for silhouette distinctness from GLM/Kimi glyphs).
+
+**Prioritization** — the user asked for prioritized (按优先级排列). So I should order the 5 points by priority, or within, give priority. They said "请评审以下 5 点并给出具体建议，按优先级排列" — I read that as: give the review of the 5 points, with recommendations ordered by priority. I'll present a priority-ordered list (P0/P1/P2), mapping to the 5 questions, then maybe a short per-question detail. Actually better: lead with a priority-ranked summary of the most important actionable decisions (since several cross-cut), then address each of the 5 numbered questions with concrete advice. Keep it 简明扼要 but concrete.
+
+Let me set priorities:
+- P0: #3 config/degradation + URL security (highest risk: key leakage, SSRF, silent breakage). Actually is it P0? For a personal widget, security risk from a config-driven base_url is real but the user configures it. Still, the degradation chain and thread-safety are correctness-critical. I'd put #3 highest.
+- P0/P1: #1 ring semantics — because getting semantics wrong means the widget lies. The "don't fabricate a ratio for daily" rule and the pace-tick are the highest-value design decisions.
+- P1: #2 reset derivation (correctness, but bounded consequence: a wrong countdown; the guard against showing 0% is the important part).
+- P1: #4 layout (affects all 4 slots, hard to change later, DPI).
+- P2: #5 icon/color (polish; but color/identity is more important than it appears).
+
+Hmm, maybe order: 1) #3, 2) #1, 3) #2, 4) #4, 5) #5. But layout/color were asked too. Let me give a priority table then detail. Actually the user said "按优先级排列" — so I'll reorder the answers by priority and note the mapping. I think a cleaner presentation: a short "结论速览" with P0 items, then the 5 answers in priority order (each headed with its original number), then a tiny "落地清单" of concrete changes.
+
+Let me also consider: should I check the workspace for the existing code? It'd make the review more grounded (e.g., actual GLM whitelist implementation). Let me do a quick glob. It's cheap. The workspace is C:\Users\jerom\AppData\Local\Temp — could contain the project. Let me check.
+
+I'll run a glob for *.py and look for the widget. Then write the review. If found, I could read the URL validation code to give concrete extensions. But the user asked for a review, concise. Still, grounding is good. Let me do a quick search.
+
+Let me be efficient: glob "**/*.py" and grep for "uapi" or "codex" maybe. One round.
+
+Then answer. Let me keep the answer in Chinese, well-structured, concise but concrete. Probably ~800-1200 words equivalent with code snippets where useful. The user asked 简明扼要, so avoid bloat but include the key concrete recommendations. I'll use tables sparingly.
+
+Let me run the checks first.
+
+Actually, should I use the project-guidelines skill? The catalog says "Apply these guidelines in every session" — it mentions progress reporting and network-aware tool usage. Hmm, it says apply in every session. But it's a skill summary; the instruction says do not follow until loaded. The description says "Apply these guidelines in every session to ensure proper progress reporting and network-aware tool usage." This looks like it's meant to be always applied. Given a system reminder listing it, and it says apply every session... I should probably load it to be safe, since it may contain rules (e.g., report progress, don't use network tools unnecessarily). Let me load it. It's cheap and it explicitly claims to apply always.
+
+Let me load project-guidelines and check the workspace concurrently.
+dsh: reasoning:
+There's a codex_icon_candidates.py in the workspace. Let me read it — this is directly relevant to point 5.
+dsh: reasoning:
+This is very useful. The workspace already has a candidate preview script that replicates the main.py pipeline. Key observations:
+
+- Pipeline already uses SS=10 supersampling → good, so the blossom supersample argument is partially addressed (it supersamples the whole rail at 10x, and the blossom mask at 4x then downsamples to size, then pasted and the whole image downsampled by 10... wait, `draw_blossom` renders mask at `size*4` then resizes to `int(size)` = 12px, then pastes into the 10x-supersampled canvas at 12*SS... hmm, actually it pastes a 12px-tall image into a canvas where coordinates are in SS units. `img.paste(color, (int(cx - size/2), int(cy - size/2)), mask)` — cw = W*SS = 440, cx = cw/2 = 220, size = 12*SS = 120. So size=120, S = 480, mask resized to 120x120, pasted at (160, ...). OK so it's consistent: size is in supersampled units (12*SS=120), and S=4x that. Fine. So the blossom IS effectively drawing at 4x of the 10x supersample = 40x final → downsampled. So anti-aliasing is handled. Good — my critique should adjust: the supersampling is already done, so the real question is whether the *structure* survives at 12px, not aliasing.
+
+Also important: GLM/Kimi/pomodoro icons are drawn on a filled disc of radius glyph_size*0.75 (i.e., 9px radius) — meaning the other three icons are on colored discs. So the Codex glyph on a gray disc (candidate A) fits. Candidate B has indigo disc + white blossom.
+
+Colors in use: GLM_BLUE (18,105,203), KIMI_GREEN (48,209,88), pomodoro RGB (191,90,242) = purple, plus pomodoro teal mentioned. SILVER (229,232,235), INDIGO (94,92,230), GRAY_DISC (58,58,60). So the author already considered silver and indigo. INDIGO (94,92,230) is quite close to GLM blue (18,105,203)? Hue: GLM blue hue ≈ 210°, indigo 94,92,230 hue ≈ 241°. They're distinguishable-ish but both blue-family. And purple pomodoro 191,90,242 hue ≈ 281°.
+
+So the free hue space is indeed magenta/pink (~320°) — but wait, is pink too close to purple 281°? 320 vs 281 = 39° apart; with saturation differences, could be confusable. Hmm. Also since pomodoro is 281° purple, magenta 320 is adjacent. A safer distinct choice given GLM blue, Kimi green, pomodoro purple/teal, alerts orange/red/yellow: the remaining big window is... let's map: 0 red(alert), 30 orange(alert), 55 yellow(alert), 140 green(Kimi), 175 teal(pomodoro), 210 blue(GLM), 241 indigo(candidate B), 281 purple(pomodoro). Unoccupied: 90 (chartreuse/lime — between yellow alert and green Kimi, risky), 320 (magenta/pink), 260 (blue-violet, squeezed), 190 (cyan, squeezed). 
+
+So magenta/pink 320 is the best truly free accent. But at 12px, and given the other marks' *fills* are light-colored glyphs on colored discs, hue of the disc is the identity. 
+
+Alternative that's arguably better: **use a neutral graphite/platinum disc (distinct by being achromatic)** — candidate D uses (120,120,128) graphite. Achromatic is the one "hue" nobody else occupies, and it maps semantically to mode=unrestricted/"informational". The risk: reads as disabled. But the disc is only the icon background; the ring color is what signals state. Candidate A uses GRAY_DISC for the disc. Hmm.
+
+Actually since the icon disc is the primary identity channel, I'd say: keep a colored disc to match the other three (GLM blue disc, Kimi green disc, pomodoro purple disc) → Codex needs a 4th disc color. Achromatic gray disc breaks the pattern but is maximally distinguishable and semantically apt (unrestricted). I'll present both with a recommendation: pink/magenta disc if you want a colored set; graphite if you're OK with the "informational" semantics — and note the gray-disc risk of being read as "disabled/no-data", mitigated because no-data is signaled by the dashed OFF_COLOR ring, not the disc.
+
+Hmm, but OFF_COLOR = (120,120,128,190) is exactly the graphite gray used as disc in candidates A/C. So a gray Codex disc would collide with the no-data gray! That's a concrete, grounded observation: GRAY_DISC (58,58,60) is dark, OFF_COLOR (120,120,128) is light gray. Different light/dark, but a gray family collision with the degraded state exists. Worth flagging: if Codex uses gray identity, the degraded dashed ring (gray 120,120,128) will be read as "Codex-ish" rather than "failed". So prefer a chromatic identity for Codex → **magenta/pink** is the answer. Good, that's a strong grounded recommendation.
+
+Now, the icon: candidate A/C/D vs B. The blossom uses petal_r = 0.21S, dist = 0.29S, center hole r = 0.10S. Let's compute geometry in final px: size=12px. petal_r = 2.52px, dist = 3.48px, hole r = 1.2px. So each petal circle is 5.04px diameter, centers 3.48px from center. Adjacent petal centers are 2*dist*sin(30°) = 3.48px apart. Petal radius 2.52px → adjacent petals overlap heavily (distance 3.48 < 2*2.52=5.04). So the union is a solid blob with scalloped edges, and a 2.4px hole in the middle. At 12px that's: a scalloped disc with a pinhole. The scallops are ~ (petal radius - half distance) = the outer bulge beyond the waist... The outer extent = dist + petal_r = 6.0px = exactly fills the 12px box. The "waist" between petals: the union boundary at the midpoint between two adjacent petals is at distance sqrt? The scallop depth = outer radius (6.0) minus the distance to the union boundary at the angular midpoint. At the midpoint angle, the nearest petal center is at angular offset 30°, so the distance from origin to that boundary ≈ sqrt(dist² + petal_r² + 2·dist·petal_r·cos(30°)) = sqrt(12.11 + 6.35 + 2*3.48*2.52*0.866) = sqrt(18.46 + 15.19) = sqrt(33.65) = 5.80. Hmm, that's not the right formula for the union boundary. Let me just reason: union of 6 circles at radius 3.48 with radius 2.52. The boundary of the union at angular midpoint: the point on the segment from origin through the midpoint... The boundary point is at distance d where the point is on the circle of the nearest petal center. Nearest petal center at angle 30° from the ray. Circle of radius 2.52 centered at distance 3.48. The ray at angle 0 passes at perpendicular distance 3.48*sin(30°) = 1.74 from that center. Circle radius 2.52 > 1.74, so the ray intersects the circle at distance along ray = 3.48*cos(30°) + sqrt(2.52² - 1.74²) = 3.01 + sqrt(6.35-3.03) = 3.01 + 1.82 = 4.83. So scallop depth ≈ 4.83 → 6.0, a ~1.17px modulation at 12px scale. That's ~1px scalloping — visible as a slightly bumpy edge but not clearly "six petals". And the 2.4px center hole will be ~1px after antialiasing — likely a smudge.
+
+So concretely: the blossom at these parameters will read as a **scalloped disc with a dot in the middle**, i.e., a blob — NOT a recognizable 6-petal knot. The scallop modulation of ~1.2px in a 12px icon is too subtle, and the hole is too small.
+
+Concrete fix numbers if they keep the approach: increase scallop depth by increasing `dist` relative to `petal_r` (more separation → deeper waist) and enlarge the hole; e.g. petal_r ≈ 0.19S, dist ≈ 0.335S, hole ≈ 0.155S. Let's compute: petal_r=2.28, dist=4.02. Adjacent centers 4.02px apart, petal diameter 4.56 → slight overlap (good, petals read as connected). Outer extent = 4.02+2.28 = 6.3 > 6.0 → slightly clipped; scale to 0.95. Scallop: perpendicular distance = 4.02*sin30 = 2.01; 2.01 vs 2.28 → intersects; distance along ray = 4.02*cos30 + sqrt(2.28²-2.01²)=3.48+sqrt(5.2-4.04)=3.48+1.08=4.56. Outer 6.3 → scallop depth 1.74px. Hole radius = 1.55*2 = 3.1px diameter. Better: ~1.7px scallop and 3px hole. That's more likely to read as a flower. But honestly at 12px with a *filled* union, the interior hole is the only thing giving it "knot" character.
+
+Better alternative: **draw the petals as stroked outlines with gaps rather than a filled union** — but at 12px, stroke would be ~1.2px; with 10x supersampling that's fine, and outlines with a gap between petals read as a rosette (like candidate C's caret is simple). Actually a stroked 6-petal rosette: six small circles outlined, not overlapping, around a center — reads as a flower at 12px. Or six short thick arcs forming a ring with notches.
+
+Honestly, my top recommendation: at 12px, **prefer candidate C (terminal ❯_) or D (GPT text)** over A/B blossom, because:
+- ❯_ is a terminal-prompt glyph, legible at 12px (simple 2-stroke), semantically matches "Codex = coding CLI agent", distinct silhouette from GLM pentagon-line, Kimi star, pomodoro hourglass.
+- But wait, the pomodoro icon is an hourglass = crossing lines; ❯_ is a chevron + underscore = also line-based; silhouettes differ enough.
+- D "GPT" text at 12*0.62 = 7.4px in Segoe UI — three capital letters at 7.4px is ~unreadable/mush on a disc (each letter ~2.5px wide). Reject D at 12px; would need ≥9px text height → size ~14.5px glyph, doesn't fit in a 15px radius ring. Also inconsistent with the icon-based set (text vs icons) and "GPT" is a brand wordmark ≠ Codex. Keep D only for the hover card title.
+
+Wait — interesting: the disc radius is glyph_size*0.75 = 9px, and the ring radius is 15px with stroke 3px. So the disc (9px radius) nearly fills the ring interior (12px inner radius). The glyph is 12px total. So there's little room. Text at 7.4px cap height on a 18px disc: 3 chars in 12px width → 4px per char. Too small. Definitely reject.
+
+So recommendation for #5: **A/B blossom is the weakest at 12px; C (❯_) is the strongest of the four candidates.** If the blossom is desired for brand recognition, fix the geometry (increase waist scallop to ≥1.5px, hole diameter ≥3px, and verify the hole survives — the current 0.10S hole → 2.4px is marginal) and accept it reads as a stylized flower, not the OpenAI knot. Also at these params adjacent petals overlap by ~1.5px so there are no visible "petal gaps" → it's a blob; that's the core defect.
+
+I should also mention: verify at actual 1:1 on the target display, not the 3x preview — the script saves a 3x preview (DS=3) which flatters all candidates; add a 1:1 strip (and a 125%/150% DPI strip) to the preview. That's a concrete, actionable testing suggestion grounded in their script. Also the script writes to E:\GIT_Space\glm-plan-dashboard\docs\... so the real project is at E:\GIT_Space\glm-plan-dashboard. I can't read it (outside workspace, sandbox may deny). I could try reading main.py there to ground points 1-4! Path: E:\GIT_Space\glm-plan-dashboard\main.py. The sandbox is workspace-write for C:\Users\jerom\AppData\Local\Temp; reading E:\ may be denied. Let me try — a read is a file operation; read-only outside workspace may be allowed? The policy says workspace-write means operations under the workspace may modify. Reads outside might be denied. Trying is safe and expected. Let me try glob/read there.
+
+Given the value (grounding 4 of 5 answers in real code), it's worth one attempt. Let me try reading main.py.
+
+Also the script's H=307 and centers (31,106,181,256) — pitch 75px, i.e., they kept the existing 75px pitch and just added 75 → 307. That's exactly the "uniform pitch" option I was going to critique. And ring radius 15, stroke 3, glyph 12, pct font 11. So per-slot content: ring 30px tall + pct text ~14px = 44px, pitch 75 → 31px of whitespace per slot. That's a LOT of slack → confirms my recommendation to compress. Excellent, now I have concrete numbers: content 44px, pitch 75px → 41% whitespace. Compressing pitch to ~56px → 4 slots = 224px, fits in existing 232px. Very concrete.
+
+Let me check: centers at 31, 106, 181, 256 → pitch 75. pct_tops 50,125,200,275 → pct baseline offset 19 from center; pct font 11px → text spans ~50-63. Next slot center 106, ring top = 106-15-1.5 = 89.5. So gap between text bottom (63) and next ring top (89.5) = 26.5px. First ring top = 31-16.5 = 14.5 → top padding 14.5. Last pct bottom = 275+14=289; H=307 → bottom padding 18. So symmetric-ish.
+
+If pitch = 56: centers = 28, 84, 140, 196; ring top of first = 11.5 (padding 11.5); last pct bottom = 196+19+14 = 229; H = 232 → bottom padding 3. Hmm, tight. Let's do pitch 58, H=240? Let's compute a clean layout for H=232: content height per slot = ring(30) + gap(4) + text(14) = 48. Four slots = 192. Remaining 40 → 5 gaps (top, 3 inter, bottom) = 8px each. So centers: top gap 8 + 15 = 23; then +48 = ... center_i = 8 + 15 + i*(48+8) = 23 + 56i → 23, 79, 135, 191. pct top = center + 15 + 4 = 42, 98, 154, 210; text bottom = 210+14 = 224 → bottom padding 8. ✓. So pitch 56, first center 23, H=232 works with 8px top/bottom padding and 8px between slots. Inter-slot gap = 8px, which is compressed vs current 26.5px. Is 8px enough visually? Ring-to-text gap within a slot is 4px; between slots 8px = 2x the intra-slot gap. That's a bit tight for grouping—usually you want inter-group > intra-group by more. Alternative: pitch 60, H=246 (14px gaps). Or H=252 with 16px gaps. So a natural compromise: H≈248-260 → pitch 60-63. I'd recommend H=252 (pitch 60, 12px inter-slot gap) as the middle ground, or 232 if you want zero footprint change. Hmm, let me present: minimum-viable 232 (pitch 56, 8px gaps — works but dense), comfortable 252 (pitch 60, 12px gaps), and if grouping with a divider, 268 (pitch 62 + divider). And explicitly recommend against 307 (pitch 75 = 31px dead space/slot).
+
+Actually careful: with a group divider, you need extra px for the divider. Say H = 232 + 20(divider+gap) if compressing = 252. Same as the comfortable option. Nice: **compress pitch to 56-60 and use the saved space to add a group divider, landing at 240-256px total** — i.e., you can add both the 4th slot AND a semantic group divider while growing only ~8-24px instead of 75px. That's a strong, concrete recommendation.
+
+Now let me try to read the real main.py to ground points 1-4. Let me attempt.
+
+I'll try glob on E:\GIT_Space\glm-plan-dashboard. Actually glob's path param defaults to workspace; I can pass path. Let me try read on E:\GIT_Space\glm-plan-dashboard\main.py directly — but the fs-observation-policy requires reading before editing; reading is fine. Let me just try.
+
+Given the guidelines skill says report progress every 2-3 tool calls, I've done 3 tool calls. Let me give a brief status and continue with the attempt. Actually I'll do the read attempt plus status in the same message.
+
+Let me do it.
+dsh: reasoning:
+I have a lot of grounding now. Let me read the rest to see the refresh loop, threading, panel info dict, etc. Lines 1190+. Let me read the rest.
+
+Key facts discovered:
+- SS = 4 (not 10; the candidate script used 10).
+- WIDGET_W, WIDGET_H = 44, 232; SLOT_CENTERS = (31, 106, 181); SLOT_BREAKS = (69, 144); SLOT_PERCENT_TOPS = (50, 125, 200).
+  - pitch = 75. ring radius 15, stroke 3, glyph 12, pct font 11.
+  - Note: SLOT_BREAKS at 69 and 144 — midpoint between centers 31 and 106 = 68.5. OK.
+- The GLM source: `_validated_usage_url` — https only, host whitelist, DNS-resolve all IPs and block private/loopback/link_local/reserved. Note it does NOT block multicast, and does NOT pin the IP (DNS rebinding not mitigated), and it constructs URL from `parsed.hostname` (good, strips creds). Also it discards the original base_url path — good. Also note it returns whitelist-based URL with no port handling (getaddrinfo with 443 hardcoded; ports in base_url are ignored since it rebuilds from hostname → good, port stripped).
+  - Notably `ip.is_reserved` doesn't cover multicast; and `.is_private` in 3.11 covers a lot. Also missing: `is_unspecified` (0.0.0.0) — actually is_unspecified is not covered by is_private? In Python, `ipaddress.ip_address('0.0.0.0').is_private` → True (it's in 0.0.0.0/8 which is_private covers). Fine. Multicast 224.0.0.0/4: is_private False, is_reserved False? Actually `is_reserved` for IPv4 covers 240.0.0.0/4. 224/4 multicast → is_multicast True, is_private False, is_reserved False (in 3.11? Python 3.11 changed is_private semantics). So multicast passes. Minor, low risk for an HTTPS GET but worth noting.
+  - The `_NoRedirect` handler rejects redirects → good, already there.
+- Kimi source: localhost daemon via http://127.0.0.1:port — note this uses `_OPENER` and no validation (it's localhost, fine).
+- The ring: `_draw_ring` frac = remaining/100. no_data → dashed. frac<=0.001 → returns after drawing track (so 0% shows empty track). Note: `_remaining_color` GREEN≥40, ORANGE 15-40, RED <15 — this colors the *summary* elsewhere? Actually in create_widget_image, GLM ring uses GLM_BLUE (brand color), and the alert is only a small badge. Interesting: so the ring is brand-colored, not status-colored, EXCEPT pomodoro which changes color by stage. And the percentage text is TEXT_SUB always... wait, RED text is mentioned in the constant comment "数字同步染红" but draw_percentage uses TEXT_SUB/TEXT_DIM only. Hmm, maybe later code. Let me check the rest.
+- `_draw_quota_badge` — small dot at lower-right of ring when remaining < 40, colored by severity.
+- Panel: PANEL_W, PANEL_H = 168, 64. target glm/kimi/pomo; title, accent, line_one, line_two, value_text.
+- Panel image doesn't have a glass/Acrylic? It says `_glass` and create_detail_image(info, target, glass=False).
+- Hover: `_slot_at(local_y)` maps y → slot key, using SLOT_BREAKS. Adding a 4th slot requires updating SLOT_KEYS, SLOT_CENTERS, SLOT_BREAKS, SLOT_PERCENT_TOPS, and the create_widget_image body, plus the info dict and create_detail_image, and _slot_at.
+- `SLOT_BREAKS` = 2 values for 3 slots; for 4 slots need 3 values.
+
+Also note: the widget has "贴边隐藏" strip mode using pomodoro progress — unaffected.
+
+Important design detail for point 1: the existing detail panel shows "周额度 X%" for GLM already! `line_one = f"周额度 {info['glm_weekly']:.0f}%"` and `_weekly_remaining` is kept "仅在详情面板呈现". So the widget already has a precedent: weekly quota shown as a *percentage* in the panel, while the *ring* shows the 5h short-term quota. That's a direct precedent for my recommendation on Codex: **weekly belongs in the panel/text, not necessarily the ring.** And it strengthens the "grouping" argument: GLM ring = 5h, panel = weekly. So for Codex, if the ring is weekly, the ring semantics differ from the other two rings' (5h) — a real semantic mismatch. Options: (a) ring = weekly remaining with a pace tick; (b) ring = weekly remaining, and treat the group divider as mandatory.
+
+Also: the widget default for no data is `--` text (TEXT_DIM) and dashed ring. For Kimi no-data they additionally draw a dash glyph instead of the icon. Note: for GLM no-data the icon disc is still drawn (GLM blue disc + mark) — inconsistent, but fine.
+
+Also `_disp`/`_targets` animation at 30fps: adding a 4th slot means adding the new value to that animation dict. And the "ease-out" 30fps render loop re-renders the whole rail each frame; a 307px-tall rail at SS=4 = 176x1228 px image, rendered repeatedly during animation. That's a perf consideration for growing height: SS=4 → 4x area increase with height. Currently 176*928 = 163k px; at 307 → 176*1228 = 216k px. Not a big deal (~30% more). Fine, minor.
+
+Also `_update_layered_window` does premultiply via ImageChops — per frame. Fine.
+
+Let me read the remainder (1190-end) to see refresh/threading and the info dict, then write the review. This matters for point 3 (thread-safety, degradation) and point 2 (reset text).
+
+Let me read from 1190.
+dsh: reasoning:
+Let me read the rest (1510-1610) to see the refresh loop / threading.
+dsh: reasoning:
+Now I have the full picture. Let me note key facts that ground my review:
+
+- `_do_refresh` spawns ONE thread doing fetch_usage() then fetch_kimi_usage() **sequentially**. GLM timeout 10s, Kimi timeout 3s × up to N instances (loop over targets, each up to 3s, `continue` on failure — so worst case 3s × number of instances). Adding Codex (another up to 10s) to that same thread lengthens the critical path; and `_schedule()` is called immediately at refresh start (not after completion), so a slow fetch can cause overlapping refreshes / thread pile-up. Actually `_schedule()` is called right after starting the thread — so the next refresh fires 300s after the *start*, independent of completion. If a fetch takes >300s (won't happen), overlap. But with a hung socket, timeout 10s bounds it. Fine. Still, the sequential fetch means one bad source delays the others' display update — all results applied atomically in `_apply_usage`. This is a real coupling problem for the 4th source: applying all-or-nothing means a 10s Codex timeout delays the GLM/Kimi UI update by 10s. Concrete recommendation: fetch each source in its own thread and apply per source (`_apply_glm`, `_apply_kimi`, `_apply_codex`), or at minimum apply GLM/Kimi results before starting the Codex fetch.
+
+- The widget's toast/tooltip: `self.root.tooltip_text` — apparently a custom tooltip? There's no tooltip implementation in what I read... it just sets the attribute. Maybe unused. Not important.
+
+- `_apply_usage` for GLM: `short_term_pct` → remaining = 100 - pct. For no data, keeps last reading (doesn't set None). Note: GLM no-data path never sets `_token_remaining = None`; only the initial 100. So GLM never shows the dashed ring after first success — it shows stale data forever. Kimi: `_kimi_remaining` starts None; on failure keeps last-known (comment says "daemon 不在跑时不清空既有读数"). So the existing implementation already has a "keep last known reading" policy — it does NOT strictly follow "failure → dashed empty ring". This is important for point 3: the widget's actual policy is "stale-keep with no staleness indicator". So my recommendation should be pragmatic and consistent: introduce an explicit state per source rather than silently keeping stale. And note there's no staleness indication at all (`_last_refresh` is in the info dict but create_detail_image doesn't render it! Looking at create_detail_image: it uses title, value_text, line_one, line_two — `last_refresh` is in info but unused). So a genuinely useful improvement: render the freshness.
+
+- `_slot_at` returns SLOT_KEYS[2] for anything >= SLOT_BREAKS[1] and <= WIDGET_H; there's a bug-ish: `if local_y > WIDGET_H: return None` but no negative check... it does check `< 0`. Fine.
+
+- No-data for Kimi draws a dash glyph instead of the icon (line 828-831), but GLM no-data keeps its icon. Inconsistent. For Codex, recommend a consistent rule.
+
+- Panel is 168×64 with a fixed layout: title at (12,8), value at (12,25) size 22, line_one at (84,23), line_two at (84,40), font size 9. So the panel has room for exactly 2 meta lines. For Codex we need: weekly usage/limit USD, weekly remaining %, reset countdown, today cost, mode/unit. That's more than 2 lines → the panel needs a variant layout (e.g., 3 lines or a different template). Concrete: PANEL_H 64 → maybe 76 for codex, or replace line_one/line_two with two lines and put today's cost in the title row. Actually there's space: value_text is at x=12 w~? and meta at x=84. For Codex, value_text "95%" and line_one "本周 $15.6/$300", line_two "重置 6d4h · 今日 $3.2". That fits 2 lines if compact. Good — recommend exactly that. And keep panel height 64 if line_two fits; `mode=unrestricted` could go into line_two or replace the countdown... Maybe line_one = "$15.6 / $300 周", line_two = "6d4h 后重置 · 今日 $3.2". And put "不限额" somewhere for daily. Hmm, "今日 $3.2" implies no daily cap issue. Add "无日限额" only if needed. I'd suggest: line_one = `周 $15.6/$300`, line_two = `6天4h 重置 · 今日 $3.2`. And the mode badge could tint the title or add a small "∞" after 今日 value. Keep it to 2 lines = no panel geometry change. That's a concrete, minimal-change recommendation.
+
+- Also `create_detail_image` is styled `value_text` colored with accent = brand color. For Codex, accent = the new color.
+
+- Percent text: `draw_percentage` shows "--" if None. For Codex weekly remaining, value = round(100*remaining). Good.
+
+- The 3 existing rings: GLM (5h remaining, brand blue), Kimi (5h remaining, green), Pomo (stage remaining, purple/teal/gray). So all three are "remaining, decreasing, short-horizon". Codex weekly = different horizon. Group divider recommendation stands.
+
+- Ring color: ring stroke uses brand color (not severity); severity only via the small badge dot at r*0.64 offset... wait `_draw_quota_badge(d, cx, cy, radius, remaining)` draws at `cx + radius*0.64, cy + radius*0.64` = (9.6, 9.6) from center, badge_r = max(3, 15*0.16=2.4) = 3px. So it's a 6px dot at the lower-right of the ring, overlapping the ring stroke. That's the only severity channel besides the number color (which is not actually severity-colored in the rail; the comment mentions it but draw_percentage uses TEXT_SUB). So the ring is brand-colored and the alert is a dot. Therefore Codex's accent color matters: the ring = brand accent, and the alert dot = green/orange/red. So the Codex accent must be distinct from GREEN/ORANGE/RED (the alert dot colors) and from GLM blue, Kimi green, purple/teal. This confirms: magenta/pink ~320° or... hmm what about the fact that GREEN (48,209,88) is both Kimi's ring color AND the "healthy" alert color? So Kimi's ring and the healthy dot are the same green — existing overlap. So avoid green/orange/red as Codex accent entirely. Remaining: magenta/pink, or silver/white, or cyan (REST_COLOR 100,210,255 is already teal/cyan for pomodoro rest — so avoid cyan).
+
+So the truly free options: magenta/pink (~320°) and achromatic silver/white. Given OFF_COLOR (142,142,147) is the gray used for dashed no-data AND pomodoro 非工作时段, an achromatic Codex identity would collide with "off/no-data" gray. So **magenta/pink is the clear recommendation**, e.g. #E0619F or #F06292 — but must be distinguishable from FOCUS_COLOR purple (191,90,242). Hue of FOCUS_COLOR: R191 G90 B242 → hue ≈ 275°. Pink #F06292: R240 G98 B146 → hue ≈ 340°. That's 65° apart — distinguishable. But careful: FOCUS_COLOR at 275° vs pink 340° — okay. And under deuteranopia, purple and pink both shift; both may look blue-ish/gray. Mitigation: different lightness (pink lighter), and positional identity. I'll note it.
+
+Also worth suggesting: rather than pure hue, use hue + a distinct *icon silhouette*; already planned.
+
+Now let me also double check the "一周 5 分钟轮询" and the `weekly_window_start` derivation: the widget already has `reset_text(left)` formatting "重置 {h}h{mm}m" with hours — for a weekly reset that's up to 168h → "重置 167h59m" is ugly. Recommendation: format as "重置 6d4h" for >24h. Concrete fix needed in `reset_text` (it currently renders hours without days). Good grounded detail.
+
+Also note: `reset_text` takes left seconds; `hours, remainder = divmod(max(0,int(left)),3600)` → for 6 days = 160h. So "重置 160h12m". Should be "6天16h". Concrete.
+
+Now the DPI issue: the app uses `SetProcessDpiAwareness`? I didn't see it. There's no DPI awareness call in what I read (no SetProcessDPIAware). tkinter geometry in pixels; without DPI awareness, Windows will bitmap-scale the window at 150% → blurry. That's presumably already the case and accepted (or the manifest handles it). Growing to 307px is in the same units, so no new DPI issue beyond occlusion. I'll mention clamping to work area: `_restore_pos` validates the center point is on a monitor, and initial y = rect[1] + (rect[3]-rect[1]-win_h)//2 — using rcMonitor not rcWork, so growing height by 75px could push the window under the taskbar on short displays? Center-based positioning with 232 already; 307 on a 1080 screen centered → fine. On a 768-height screen: (768-307)/2 = 230 top, bottom at 537 — fine. So the risk is modest; but the real point is: the panel! `_panel_position` clamps target_y to `rect[3] - PANEL_H - PANEL_GAP` using rcMonitor. Fine.
+
+Another concrete layout note: `SLOT_BREAKS` and `SLOT_CENTERS` are module constants used in `_slot_at` and `_panel_position`; the candidate script duplicated them. If they grow to 4 slots they must update 5 places consistently (SLOT_KEYS, SLOT_CENTERS, SLOT_BREAKS, SLOT_PERCENT_TOPS, create_widget_image). Recommend deriving breaks programmatically: `breaks = [(a+b)/2 for a,b in zip(centers, centers[1:])]` and `pct_tops = [c + 19 for c in centers]`, and define a single `SLOT_SPECS` list of (key, center, ...) so there's one source of truth. That directly reduces the risk of the 4th slot breaking hover mapping. Good actionable recommendation, grounded in the actual code duplication (the candidate script already drifted: SS=10 vs 4, and colors OFF_COLOR 190 vs 255, HAIRLINE 46 vs 26, TEXT_SUB 255 vs 185 — the preview is NOT pixel-faithful to main.py! That's a concrete finding worth flagging: the candidate preview uses different constants than main.py, so the preview at 12px doesn't faithfully predict the real render).
+
+Indeed: script HAIRLINE (255,255,255,46) vs main RAIL_HAIRLINE (255,255,255,12); OFF_COLOR (120,120,128,190) vs main (142,142,147,255); TEXT_SUB (235,235,240,255) vs main TEXT_SUB (255,255,255,185); BAR_TRACK 40 vs 36; SS 10 vs 4; ring radius/stroke/glyph same. So the preview's grey dashed no-data ring is much dimmer than the real one. And the script's pct font "segoeui.ttf" vs main "seguisb.ttf" (semibold) and size 11*SS. Font weight differs → perceived legibility differs. This is a legit review point for #5: make the preview identical to main.py (import constants), else you'll approve an icon that looks different in production. Strong, concrete, grounded.
+
+Also, the real pipeline has `_draw_icon_disc` radius = glyph_size*0.75 = 9px with the 12px glyph on top; script replicates. Good.
+
+Now, one more important thing for #5: main.py's Kimi icon is a 16-point star (polygon filled) and GLM is a 5-point polyline crystal; pomodoro is an hourglass of 4 lines. All are high-contrast light-on-colored-disc. The blossom (six circles union + center hole) rendered white on a gray disc — the union produces a scalloped disc ~12px with a 2.4px hole. Given petal_r=2.52, dist=3.48 → scallop depth ~1.17px. With SS=4 supersampling (not 10 as in the script), the real 12px glyph has only 48px of source → the 1.17px scallop = 4.7 source px, still renders but soft. And the hole = 2.4px → after LANCZOS to 12px, ~2px dark dot. So it reads as a donut-ish blob. Concrete numbers to give.
+
+Let me now also reconsider: is candidate B (white blossom on indigo disc) vs A? B's indigo (94,92,230) is close to GLM blue in hue (241 vs 210) and also close to FOCUS purple (275). Reject B per my color analysis. C (❯_ silver on gray disc): gray disc = GRAY_DISC (58,58,60) dark, OFF_COLOR is 142 gray — the disc is dark gray so it won't be confused with the dashed ring. ❯_ at 12px: chevron stroke w = max(2, 12*0.18=2.16) → 2px at SS=4 → 8 source px. Legible. But: candidate C's disc is SILVER (229,232,235)?? Look: CANDIDATES C = ("C 终端符 ❯_ · 银白", SILVER, GRAY_DISC, lambda ... draw_caret(d,...(235,240,255,255))). The tuple is (label, ring_color, disc_color, glyph). So C: ring_color=SILVER, disc=GRAY_DISC, glyph light. A: ring=SILVER, disc=GRAY_DISC, glyph=SILVER blossom. So A and C both use SILVER ring + gray disc; only the glyph differs. D: ring=SILVER, disc=(120,120,128) graphite, glyph white "GPT".
+
+So the script's candidates are mostly silver-ringed. My color advice: use a chromatic accent (pink/magenta) for the ring so it doesn't collide with the OFF_COLOR gray and with the alert set; and the disc should be a *brand-ish* chromatic disc like the other three (GLM blue disc, Kimi green disc, pomodoro purple disc) → so Codex disc = magenta/pink, glyph white. That means candidate B's structure (colored disc, white glyph) with the color changed from indigo to magenta. That's a concrete recommendation: "B 的形制 + 洋红配色" → white blossom on #C2478F-ish disc? Careful: on a colored disc, white glyph. The other discs: GLM blue #1269CB (dark enough for white), Kimi green #30D158 (light — and the Kimi glyph uses a light mint fill (224,255,229) on green disc, i.e., light-on-light! and the center dot is dark green). Pomodoro disc = stage purple #BF5AF2 with white hourglass. So white-on-color is the pattern.
+
+For magenta: pick something with enough darkness for white contrast: e.g. #C2185B (deep pink) or #D81B60 — but those border on "red/pink" which might read as alert? Pink ≠ red alert. Alternatively #A21CAF (purple-magenta) — too close to purple. I'd suggest a *raspberry/magenta* like #C0246E or #B5179E. Contrast vs white glyph is good. Hue ~330°.
+
+Hmm, but also consider: the alert set is GREEN/ORANGE/RED as dots. A pink ring won't be confused with those dots.
+
+Let me finalize: recommend **#B5179E / #C0266E (raspberry-magenta, hue ≈ 320–330°)** as Codex accent; ring stroke + disc; white glyph. If they prefer the "informational/unrestricted" semantics, a *light* neutral silver (#E5E7EB) is the alternative but collides with OFF_COLOR gray used for no-data (142,142,147) — distinguishable by lightness (229 vs 142), so it's acceptable but weaker.
+
+Now for point 1, one more consideration: the ring for Codex is weekly remaining, near 95%. The `_draw_ring` special-case: `if frac >= 0.999: full ellipse`. 94.8% → arc. Fine. But a ring that sits at 90-100% all week has almost no dynamic range. And the `_set_targets`/animation: when the week resets, the ring jumps 5%→100% and animates. That's a nice moment; with the pace tick it'd be even better. Good.
+
+Also: USD quantities mean the percentage is not the only useful number. The panel should show absolute USD (already recommended).
+
+One more: `weekly_usage_usd=15.6` vs `weekly_limit_usd=300` → 5.2% used. But wait: the candidate preview shows Codex 95% — consistent.
+
+**Additional risk**: is `weekly_usage_usd` cumulative for the window, and `weekly_window_start` the start? Yes per description. But if the relay's `/v1/usage` response includes *both* weekly and monthly, the monthly is also available (1200/103.3 = 8.6% used) → the panel can show monthly too (like Kimi's 月额度 line). Good: panel line_one = 周/Panel line_two could be 月. But then where's reset? The panel has only 2 meta lines. Suggest: line_one = 周 $15.6/$300 (5%), line_two = 重置 6天4h · 今日 $3.2. Monthly can be dropped or shown in the tooltip. Or if they want monthly: put value_text = weekly remaining %, line_one = `周 $15.6/$300`, line_two = `月 $103/$1200`. And the reset + today go to tooltip. Given the 168×64 panel constraints, I'd say: value = 周剩余 %, line_one = `周 $15.6/$300`, line_two = `6天4h后重置 · 今日$3.20`. Clean. And optionally a 3rd line by making the panel taller only for codex — but the panel geometry is shared (`PANEL_H=64` used in `_panel_position` and hit test) → keep 64 to avoid touching geometry.
+
+Now, also: metric mismatch — "剩余比例" for GLM/Kimi is derived from `percentage` (already used%), while for Codex it's derived from USD. Both end up as remaining %. So the number displayed "95%" is comparable in form but not in meaning (5h vs 7d). The group divider + a small period marker (e.g., a tiny "7d"/"5h" label) — but 11px font in 44px width... They could replace the "%" with... no. Alternative: in the ring, draw a tiny tick at 12 o'clock for a "weekly" slot (like a subscript), or render the percentage with a period suffix suppressed. Hmm. Simpler: the group divider + the icon identity. Good enough. I could suggest a 1px tick at the ring top for "long horizon" but that may be over-engineering. Actually the pace tick I recommend IS a tick on the ring; if I also use a tick for "weekly" it's confusing. Choose: pace tick (more value). Keep period identity to the divider + icon + card.
+
+OK. Also for the no-data state of Codex: dashed ring + `--`. And per existing convention, GLM keeps its icon, Kimi replaces with a dash. Recommend: always keep the icon (a stable 4-icon column is more scannable than one slot losing its icon), and signal no-data via the dashed ring + `--` only. That's an improvement over Kimi's dash-glyph hack. Also `_draw_quota_badge` with remaining=None returns early → no badge. Good.
+
+Now let me also confirm the `--` rendering for `value=None`: `draw_percentage` → text = "--", color TEXT_DIM. Good.
+
+One more for point 3: the key must never be logged. Existing code logs `print(f"API 错误: {exc}")` — URLError messages contain the URL but not the Authorization header. Good. But if they use `requests`-style or log the request, careful. Also `dashboard.log` is in the project dir — ensure the key isn't written. Also: the existing GLM code puts the token in `Authorization` WITHOUT "Bearer " prefix (line 331: `"Authorization": token`) — that's specific to GLM's endpoint. Kimi uses `Bearer {token}`. For Codex, use `Bearer {key}` per the spec. Worth flagging: don't reuse the GLM header convention.
+
+Also: `_validated_usage_url` hardcodes port 443 in getaddrinfo and rebuilds the URL from hostname → strips any port. For the Codex relay host uapi.ccwu.cc, the same approach works. Recommendation: refactor `_validated_usage_url(base_domain, path, allowed_hosts)` to be reusable rather than copy-pasting, and extend the checks (multicast/unspecified, and configurable host list from config.json, plus optional user-trusted host pinning). Also add `is_unspecified`.
+
+Also DNS rebinding: existing code resolves and checks but then `_OPENER.open(url)` re-resolves → TOCTOU. For an attacker to exploit this they'd need to control the hostname resolution AND be the configured base_url — the threat model is "malicious content in config.toml", so DNS rebinding is a marginal added risk. I'll mention it as optional hardening, not P0. The bigger gap: the *host allowlist* is static for GLM (3 known hosts) but for Codex the host comes from a file the user edits → the whitelist model breaks. So the right move: allowlist from the widget's own config.json (where the user opts in), and the codex config.toml base_url is only used if its host is in that allowlist OR the user has marked it trusted. Simplest safe rule: read `codex_usage.base_url` from the widget's own config.json (primary), and use config.toml's base_url only as a *hint* that must match the allowlist. That prevents a tampered config.toml from redirecting the key to an arbitrary host. Strong recommendation — it addresses "key 可能被送到攻击者域名".
+
+Also: since `auth.json` key would be sent to `config.toml`'s base_url, a tampered config.toml + the user's real key = key exfiltration. That's the #1 security issue and deserves P0. Mitigation: (a) host allowlist/pinning required before sending the key; (b) prefer the widget's own config for the URL; (c) never send the key over a host not in the allowlist; (d) log a clear warning when the host isn't allowlisted.
+
+Now the ordering. The user asked "按优先级排列". I'll produce a priority-ordered answer. Let me choose:
+
+P0-1: #3 安全/降级（key 外泄面 + 降级链 + 独立线程应用）
+P0-2: #1 环形语义（不要为 daily 造分母；ring=周剩余 + pace tick）
+P1-3: #2 重置推算（时区/DST、服务端权威、跨周期用 window_start 变化而非本地时钟；reset_text 天格式化）
+P1-4: #4 布局（不建议 307；建议压缩槽距 + 分组分隔线，H≈252；单一 SLOT_SPECS 源）
+P2-5: #5 图标/配色（12px 花结不可辨的量化原因；建议候选 C 或修正几何；配色 洋红/覆盆子；预览脚本与 main.py 常量已漂移）
+
+Hmm, but should #4 layout be above #2? Layout affects all four and is hard to change later; #2's risk is bounded to a countdown label. But #2 also has the "show 0% at boundary = fabricated reading" issue which is a correctness rule. I'll keep #2 above #4 but mention they could swap. Actually, let me reconsider: the user listed 1-5; I'll answer in priority order with explicit P-tags and keep their numbers visible.
+
+Let me write it concisely but with the concrete numbers. Use headers like "P0 · ③ 配置解析与降级链". Include a few short code fragments where they're worth it (URL validation, reset parse). Keep it tight. Target maybe 1000-1400 words. The user said 简明扼要 — so be disciplined: bullets, no filler.
+
+Let me draft.
+
+---
+
+## 结论速览（按优先级）
+
+P0 ③ 安全 + 降级链 → P0 ① 环形语义 → P1 ② 重置推算 → P1 ④ 布局 → P2 ⑤ 图标/配色
+
+I'll write each with: 判断 / 具体建议（可执行）.
+
+### P0 ③ 配置解析与降级链
+
+Facts: existing `_validated_usage_url` = https + 3-host whitelist + DNS 全 IP 阻断 private/loopback/link_local/reserved; `_NoRedirect`; timeout 10s.
+
+Issues:
+1. **白名单模型在新的可配置 host 上直接失效** — uapi.ccwu.cc 不在 `SUPPORTED_USAGE_HOSTS`，而 host 来自用户可编辑的 config.toml。若直接把它加进白名单/改成"读 config.toml 的 host 就发 key"，等于把 auth.json 里的真实 key 交给任意可写 config.toml 的进程/文件。**这是本次改动最大的风险面：key 外泄**。
+   建议：**URL 与 key 的来源解耦**。widget 自己的 `config.json` 新增 `codex` 段（`base_url` + 是否允许自动跟随 codex CLI），只有 `base_url` 的 host 命中该段（或显式 `trusted_hosts`）时才把 key 发出去；config.toml 的 base_url 只作为 *候选*，命中不了就降级为"未授权域名"而不是照发。默认 allowlist 加 `uapi.ccwu.cc`。
+2. 复用而非复制 `_validated_usage_url`：改成 `_validated_url(base_domain, path, allowed_hosts, port=443)`；补 `ip.is_multicast or ip.is_unspecified`；host 从 `urlsplit` 重建时已经丢掉 path/port/creds（现实现正确，保持）。DNS-rebinding 的 TOCTOU 现实现没管——威胁模型是本地文件被改，属可接受，若要收紧需连 IP 不连域名，性价比低，可不做。
+3. tomllib/auth.json 细节：`tomllib.load(open(path,"rb"))`；捕 `TOMLDecodeError/OSError/PermissionError`（Codex CLI 正在写配置时会读到半截，解码失败后 0.3s 重试一次）；尊重 `CODEX_HOME`；provider 名不要写死 "OpenAI"——先读顶层 `model_provider` 再查 `model_providers[<name>]`。auth.json 的 key 可能是嵌套/带引号/已含 `Bearer ` 前缀，strip+去前缀；**日志只打指纹**（`sk-****c4f2`）——现有 `print(f"API 错误: {exc}")` 不会带 header，继续保持，别把 req 全量打出来。401/403 时重读一次 auth.json（key 轮换）再判失败。
+4. 五个降级态要在详情卡文案上区分，不要都是"失败"：未配置 / 网络不可达 / 401-403 密钥失效 / 404 中转站无此端点 / 200 但字段不可解析（`weekly_limit_usd<=0` 或缺失）。都不是"无限制"。
+5. **每个来源独立线程 + 独立应用**：现在 `_do_refresh` 是一条线程里顺序 `fetch_usage()`→`fetch_kimi_usage()`，再由 `_apply_usage` 一次性落地。加第四个源后，Codex 一次 10s 超时会连带把 GLM/Kimi 的 UI 更新推迟 10s。改成 `_apply_codex(...)` 等按源调用（`root.after(0, ...)` 回主线程已经是对的，保持）。
+6. 关于"失败不伪造"：现实现其实**不清空上次读数**（`_apply_usage` 注释：daemon 不在跑时不清空既有读数；GLM 也只在成功后赋值），且详情卡并没有画出 `last_refresh`。建议显式化三态：新鲜=实心、陈旧=降饱和实心 + 卡片标"上次成功 HH:MM"、未知=虚线空环 + `--`。TTL 建议 3 个轮询周期（15min）后转虚线。
+
+### P0 ① 环形语义
+
+- 对齐现有"剩余递减"是对的：三个槽位都是 remaining、逆时针递减、虚线=无数据，第四槽不该引入新语法。
+- 但语义不齐：GLM/Kimi 槽 = 5h 窗口，Codex = 7d 窗口；而且**工程里已经有先例**：GLM 的周额度就是放在详情卡的 `周额度 X%`，环上不放。所以 Codex 用周剩余做环是"把一个慢变量放进快变量列"，一周里基本钉在 94–100%，动态范围被浪费，且与旁边 5h 环并排容易被当成同一类。
+- 建议（低成本、高信息量）：**环=周剩余比例不变，另加一根"进度基准刻度"**：在环上按 `elapsed/7d` 位置画一个 1.5px 的中性灰刻度（与告警三色无关）。环长于刻度=消费慢于时间（安全），短于=超支。这样既保留跨槽位可比性，又把"一周 95%"变成有意义的读数。
+- **daily 不要画环**：`daily_limit_usd=0` 时没有分母，任何归一化都是伪造读数（与项目自己的规则冲突）。三选项里"今日已用 cost 画环"最差——它把绝对量伪装成比例。建议：环只由周额度承担；每日/每月走**绝对值文本**，只在 `daily_limit_usd>0 且 mode!=unrestricted` 时才按同一模板加第二个环（feature-detect，不写死）。
+- `mode=unrestricted` 不要改环的线型（会与"虚线=无数据"撞车），只在详情卡文字体现（如 `无日限额`）；卡片可以放 `∞`，主轨 44px 放不下也不要放。
+
+### P1 ② 周重置推算
+
+- 风险：(a) **时区/DST**——`weekly_window_start` 带 `+08:00`，必须用 aware datetime 加法、并把展示时区固定成该 offset，不能用机器本地 naive 时间加 7 天（跨 DST 会差 1h，"重置 09-28 00:00" 显示成 23:00）；(b) **服务端语义是猜的**（样本 1 个）：可能懒更新，`window_start` 可能是上一窗口；(c) 边界——本地时钟越过推算重置点而服务端还没给新窗口时，绝不能把环置满或显示负数。
+- 更稳妥做法，按重要性：
+  1. **跨周期判定用 `window_start` 变化，不用本地时钟**：保留上一次 `window_start`，变了才认为新窗口（可触发回填动画）。本地推的时间只用于展示。
+  2. 解析用 `datetime.fromisoformat`（3.11+ 直接吃 `+08:00`），保留 tzinfo；`reset = start + timedelta(days=7)` 在 aware 上做；比较用 UTC 时间戳。
+  3. 用服务端字段优先：`weekly_window_start` 只用于展示；`expires_at=2027-05` 是**订阅到期**，千万别绑到环上。
+  4. 合理性校验：`window_start` 未来 / 早于 7–8 天前 / `window_start+7d <= now` → 视为陈旧，卡片显示 `--`，环沿用上一读数（或虚线），不推算。
+  5. 顺手修 `create_detail_image.reset_text`：它只输出 `h{m:02d}m`，周窗口会显示"重置 160h12m"，加一层 `>24h → N天Mh`。
+
+### P1 ④ 布局
+
+- 307 = 沿用 75px 槽距 +75。**不建议**：单槽内容实测只有环 30px + 4px 间隙 + 百分比 14px ≈ 48px，75px 槽距里有 **27px 是死空白**（现在 3 槽就是 232 里 ~40% 是空白）。4 槽 307px 在 1080p 占 28% 屏高、768p 占 40%，遮挡、鼠标行程、贴边隐藏的热区都变差，收益只有"少调一次参数"。
+- 方案：**压缩槽距到 56–60，把省下的空间换成一条语义分隔线**。给两档具体数：
+  - 保守（零窗口尺寸变更）：H 保持 **232**，槽距 56，上/下留白 8px，槽心 `(23,79,135,191)`，百分比 top `(42,98,154,210)`——槽间距只有 8px，偏挤。
+  - 推荐：H≈**252**，槽距 60，槽心 `(30,90,150,210)`，在 Kimi 与 Codex 之间插 1px 分隔线（+8px 净空）。只长 20px 就同时拿到第 4 槽和"5h 组 / 周额度组"的视觉分组。分组是有必要的：前三槽是"当下会话"，Codex 是"周期预算"，分开可显著降低"95% 的周环"被当成同类快变量的误读。
+- 工程侧：现在 `SLOT_KEYS/SLOT_CENTERS/SLOT_BREAKS/SLOT_PERCENT_TOPS` 四处 + `create_widget_image` 独立维护，加槽要同步 5 处（预览脚本已经漂移了，见 ⑤）。合并成单一 `SLOT_SPECS = ((key, center, pct_top), ...)`，`SLOT_BREAKS` 由相邻槽心取中值推导，`_slot_at`/`_panel_position` 只读这一处，加槽不再有漏改风险。
+- 面板：`PANEL_H=64` 的两行 meta 要装下 周用量/重置/今日，建议 `line_one = "周 $15.6/$300"`、`line_two = "6天4h后重置 · 今日 $3.2"`，`value_text` 仍是周剩余 %。这样**不改面板几何**（改高会牵动 `_panel_position` 的钳制与命中测试）。月额度先放 tooltip。
+
+### P2 ⑤ 图标与配色
+
+- 花结（六个圆并集+中心打孔）在 12px **不可辨**，按你脚本的参数可以算出来：`petal_r=0.21S、dist=0.29S` → 成品 12px 下花瓣半径 2.52px、间距 3.48px（相邻花瓣重叠 1.5px，是实心并集成一团），每个花瓣的外凸只有 **1.17px**，中心孔直径 **2.4px**；再经 SS=4 缩小，这 1px 级起伏和 2px 孔基本糊成一个"带针眼的凹凸圆饼"，既不像花结，也不像 OpenAI 的编结（编结的上下穿插结构在这个尺寸根本没画）。若要保留这个画法，至少把腰深拉到 ≥1.5px、孔拉到 ≥3px（例如 `petal_r≈0.19S、dist≈0.335S、孔≈0.155S`），并接受它只是"风格化六瓣花"。
+- 四个候选里 **C（终端符 ❯_）在 12px 最可辨**：两笔折线，线宽 2px，轮廓与 GLM 五角晶体/Kimi 星芒/番茄沙漏都不撞，且语义对（Codex=编码 CLI）。**D（GPT 字标）不成立**：`size*0.62` → 7.4px 字高、三字母挤在 12px 宽里，必糊；而且"GPT"是字标、也不是 Codex，且与其它三个图形不一致——留给详情卡标题用。B 的形制（白 glyph + 品牌色底盘）是对的，但别用靛蓝。
+- 配色：环色与 icon 底盘已占满 **GLM 蓝 210°、Kimi 绿 140°、番茄紫 275°/teal 190°、告警绿橙红**，而 `OFF_COLOR(142,142,147)` 灰色同时是"无数据虚线"和"番茄非工作时段"。所以：**不要用灰/银**（会和虚线无数据、OFF 灰撞）、**不要用靛蓝**（贴 GLM 蓝和番茄紫）、**不要用青**（撞 REST teal）、**不要用绿/橙/红**（撞告警点 `_draw_quota_badge`）。唯一宽敞的区间是 **320–335° 洋红/覆盆子**，建议 `#B5179E`/`#C0266E` 一类的环色 + 同色底盘 + 白色 glyph（与 Kimi/番茄"浅 glyph 压色盘"的样式一致）。色盲安全靠位置+形状，不靠色相，所以这个选择风险可控；但请顺手把 `draw_percentage` 的告警染色补上（常量注释写了"数字同步染红"，实际只用 TEXT_SUB/TEXT_DIM）。
+- **预览脚本与 main.py 常量已漂移**：脚本 `SS=10`（main 是 4）、`RAIL_HAIRLINE 46/12`、`OFF_COLOR(120,120,128,190)` vs main `(142,142,147,255)`、`TEXT_SUB` 不同、百分比字体 `segoeui.ttf` vs main `seguisb.ttf`（Semibold）。用这个预览挑选 12px 图标会误判（无数据灰环明显比实机暗、字重也不同）。请让它 `from main import` 复用常量，并输出**1:1 像素条**（现在 DS=3 放大，对 12px 判断偏乐观）；有条件再在 125%/150% 缩放各看一眼。
+
+Then a short closing "落地顺序" maybe. Keep it brief. Actually the answer is already long; maybe end with one line: 先做 ③ 的安全/降级与 ① 的语义定案（改动小、影响大），再做 ④ 的 SLOT_SPECS 合并，最后 ⑤。
+
+I think that's a strong, concrete, prioritized review. Let me tighten the wording and format. Use Chinese. Avoid excessive length—but the user asked for specifics on 5 points, so length is justified. I'll trim redundancy.
+
+One correction: for the "保守" layout with H=232, I computed centers (23,79,135,191) with pitch 56. Check: top padding 8, ring top = 23-16.5 = 6.5 → not 8. Let me recompute properly. Content: ring is 2*(15+1.5)=33px tall (bbox 30 + stroke 3 → outer 33). Text 11px font, bbox height ~14 (with ascent/descent). Slot block = 33 + gap + 14.
+
+Simplify: define slot pitch P, first center C0. ring outer top = C0 - 16.5. text top = C0 + 19 (from main: pct_top = center + 19), text height 14 → text bottom = C0 + 33.
+Constraint: C0 - 16.5 >= pad_top → C0 >= 16.5 + pad_top.
+Last text bottom = C3 + 33 <= H - pad_bottom.
+With P=56: C3 = C0 + 168. C0 + 168 + 33 <= 232 - pad_bottom → C0 <= 31 - pad_bottom.
+And C0 >= 16.5 + pad_top. With pad_top = pad_bottom = 8: C0 >= 24.5 and C0 <= 23. ✗ conflict! So pitch 56 doesn't fit in 232 with 8px padding. Let me redo.
+
+Available for the 4 slots: total height = ring_top_of_first to text_bottom_of_last = (C0-16.5) to (C3+33). That span = (C3+33) - (C0-16.5) = 3P + 49.5. Set <= 232 - 2*pad. With pad=6 → 220 → 3P <= 170.5 → P <= 56.8. So P=56, 3P=168, span = 217.5, padding total = 14.5 → pad ≈ 7.25 each. Then C0 = 16.5 + 7.25 = 23.75 ≈ 24. Centers: 24, 80, 136, 192. Check last text bottom = 192+33 = 225; 232-225 = 7. ✓ So P=56 works with ~7px padding, centers (24,80,136,192), pct tops = center+19 = (43,99,155,211).
+
+My earlier (23,79,135,191) is equivalent (pct offset may vary). Good, I'll state centers (24,80,136,192) and pct tops (43,99,155,211), H=232, inter-slot gap = 56 - 47 = 9px... compute inter-slot gap: text bottom of slot i = C_i+33; ring top of slot i+1 = C_{i+1}-16.5 = C_i+56-16.5 = C_i+39.5. Gap = (C_i+39.5) - (C_i+33) = 6.5px. So 6.5px gap between text and next ring, vs intra-slot gap (ring bottom C_i+16.5 to text top C_i+19) = 2.5px. So inter 6.5 vs intra 2.5 — ratio 2.6×, acceptable grouping but tight. Fine, and I'll note it's tight.
+
+For H=252, P=60: span 3*60+49.5 = 229.5; padding total = 22.5 → 11.25 each. C0 = 16.5+11.25 = 27.75 ≈ 28. Centers (28,88,148,208). Last text bottom = 208+33 = 241, 252-241 = 11. ✓. Inter-slot gap = (C_i+60-16.5)-(C_i+33) = 10.5px; intra 2.5px → ratio 4.2×. Better grouping. And add the divider: with a 1px line + spacing you'd want maybe 14px gap between Kimi and Codex → then H ≈ 256.
+
+Simplest presentation: H=232 (pitch 56, centers 24/80/136/192) as the zero-footprint option; H=252 (pitch 60, centers 28/88/148/208) as recommended, and put the 1px divider in the 10.5px gap, optionally H=256 with a 14px gap there. Good.
+
+Let me present these as concrete numbers but keep it readable, not overwhelming.
+
+Also for the pace tick: with ring radius 15 and stroke 3, a tick would be at the radius; draw a 1.5px radial notch just outside/on the ring. At 44px wide and SS=4, fine.
+
+Hmm, one issue with the pace tick: the ring's remaining arc starts at -90° and grows clockwise; the tick at elapsed fraction would overlap the arc. Better: draw the tick on the *track* ring (which is drawn first) — arc() then tick over it, or draw the tick slightly outside the ring (radius+3). Drawing just outside keeps it clean. I'll say "在环外侧 1px 处画 1.5px 中性灰刻度（或者画在轨道上、压在弧之下）". Good.
+
+Also for #1, I should mention that the pace tick uses the derived window_start from #2, so if #2's derivation is unreliable, the tick is cosmetic-only — consistent.
+
+Now write the final answer. Keep it organized with clear headers and priorities. I'll aim for concise bullet style.
+
+I also should note the two `_POINT` class redefinitions (line 70 and 986) — harmless, out of scope, skip.
+
+Let me write it.
+已读完全部 1610 行（`fetch_usage`/`fetch_kimi_usage`/`_validated_usage_url`/`_draw_ring`/`create_widget_image`/`create_detail_image`/`_slot_at`/`_do_refresh`/`_apply_usage`），以及你的候选预览脚本。以下评审里的数字都按实机常量（`SS=4`、槽距 75、环 r15/描边 3/图标 12/百分比 11px）算，不是按预览脚本（它已漂移，见 ⑤）。
+
+**优先级：③ 配置与降级 > ① 环形语义 > ② 重置推算 > ④ 布局 > ⑤ 图标配色**
+
+---
+
+## P0 · ③ 配置解析、安全与降级链
+
+**最大风险不是解析失败，而是 key 外泄。** 现有 `_validated_usage_url` 的安全模型是"https + 三个写死的 GLM 域名 + DNS 全 IP 私网阻断"，这依赖 host 不可配置。Codex 的 host 来自用户可编辑的 `~/.codex/config.toml`，而 key 来自 `auth.json`——一旦"读 config.toml 的 base_url 就照发 key"，任何能改那个文件的东西都能拿到你的真实 key。
+
+- **把 URL 与 key 的来源解耦**：widget 自己的 `config.json` 新增 `codex` 段（`base_url` + `trusted_hosts`，默认含 `uapi.ccwu.cc`）。只有 host 命中该段时才发 key；`config.toml` 的 base_url 只作**候选**，未授权就降级为"域名未授权"，绝不照发。这是唯一能挡住"config.toml 被改→key 被送到攻击者域名"的做法。
+- **复用而非复制**校验：抽成 `_validated_url(base_domain, path, allowed_hosts)`，补 `ip.is_multicast or ip.is_unspecified`（现实现漏了组播）。现实现从 `urlsplit().hostname` 重建 URL，已正确丢掉 path/port/凭据，保持。DNS-rebinding 的 TOCTOU 现实现没处理——威胁模型是本地文件被改，性价比低，可不做。
+- **tomllib 细节**：`tomllib.load(open(p,"rb"))`，捕 `TOMLDecodeError/OSError/PermissionError`（Codex CLI 正在写配置时会读到半截 → 0.3s 后重试一次）；尊重 `CODEX_HOME`；**provider 名别写死 `"OpenAI"`**——先读顶层 `model_provider` 再查 `model_providers[<name>]`。auth.json 的 key 可能带引号/已含 `Bearer ` 前缀，strip 后判前缀；401/403 时重读一次 auth.json（key 轮换）再判失败。**日志只打指纹**（`sk-****c4f2`）——现有 `print(f"API 错误: {exc}")` 不带 header，保持，别把请求对象整体打出来。注意 GLM 用的是裸 `Authorization: token`，Codex 要 `Bearer`，别复用。
+- **五个降级态要在文案上区分**（环都是虚线空环 + `--`，卡片不同）：未配置 / 网络不可达 / 401-403 密钥失效 / 404 中转站无此端点 / 200 但 `weekly_limit_usd<=0` 或缺失。都不是"无限制"。
+- **每源独立线程 + 独立落地**：现在 `_do_refresh` 在一条线程里顺序 `fetch_usage()` → `fetch_kimi_usage()`，再由 `_apply_usage` 一次性生效。加第四源后，Codex 一次 10s 超时会连带把 GLM/Kimi 的 UI 更新推迟 10s。拆成 `_apply_codex(...)` 按源 `root.after(0, ...)` 落地。
+- **"不伪造读数"要显式化**：现实现其实**从不因失败清空上次读数**（`_apply_usage` 注释明说 Kimi 不清空，GLM 也只在成功时赋值），且 `create_detail_image` 拿到了 `last_refresh` 却没用。建议三态：新鲜=实心 / 陈旧=降饱和实心+卡片"上次成功 HH:MM" / 未知=虚线空环+`--`；TTL 取 3 个轮询周期（15min）后转虚线。
+
+## P0 · ① 环形语义
+
+- 用周剩余对齐"剩余递减"**方向正确**，但语义不齐：前三槽是 5h 会话，Codex 是 7d 预算；而且工程里**已有先例**——GLM 的周额度就只放在详情卡（`周额度 {:.0f}%`），环上不放。把周剩余放进这一列，等于把慢变量插进快变量列：一周里恒在 94–100%，动态范围全废，还容易被当成同类读数。
+- **建议：环=周剩余比例不变，另加一根"进度基准刻度"**——按 `elapsed/7d` 在环外侧 1px 处画 1.5px 中性灰刻度（与告警三色无关）。环长于刻度=消费慢于时间（安全），短于=超支。保留跨槽可比性，同时把"95%"变成有意义的读数。这根刻度依赖 ② 推算，所以它只是装饰性提示，不参与状态判定。
+- **daily 绝不画环**：`daily_limit_usd=0` 时没有分母，任何归一化都是伪造读数，直接违背项目自己的规则；把 `cost` 当日额比例的画法最差——把绝对量伪装成比例。环只由周额度承担；日/月走**绝对值文本**；仅当 `daily_limit_usd>0 且 mode!=unrestricted` 才按同一模板 feature-detect 出第二个环。
+- `mode=unrestricted` **不要改线型**（会和"虚线=无数据"撞），只在卡片里写字（如 `无日限额`）。卡片放 `∞` 可以，44px 主轨放不下也别放。
+
+## P1 · ② 周重置时刻推算
+
+- 风险三条：**(a) 时区/DST**——`+08:00` 必须用 aware datetime，展示时区固定成该 offset，不能用机器本地 naive 时间加 7 天（跨 DST 会差 1h，把"09-28 00:00"显示成 23:00）；**(b) 服务端语义是猜的**（单样本）：可能懒更新，`window_start` 可能是上一窗口；**(c) 边界**——本地时钟越过推算点而服务端还没给新窗口时，绝不能把环置满或显示负数。
+- 更稳妥，按重要性：
+  1. **跨周期判定用 `window_start` 变化，不用本地时钟**：缓存上次值，变了才算新窗口（顺便触发回填动画）。本地推的时间只用于展示。
+  2. `datetime.fromisoformat`（3.11+ 直接吃 `+08:00`）保留 tzinfo；`reset = start + timedelta(days=7)` 在 aware 上做；比较走 UTC 时间戳。
+  3. 合理性校验：`window_start` 在未来 / 早于 7–8 天前 / `+7d <= now` → 视为陈旧，卡片 `--`，环沿用上一读数（或虚线），不推算。
+  4. **`expires_at=2027-05` 是订阅到期，绝不能绑到环上**——这类字段很容易被顺手当"重置时间"用。
+  5. 顺手修 `create_detail_image.reset_text`：它只输出 `h{m:02d}m`，周窗口会显示"重置 160h12m"，加 `>24h → N天Mh`。
+
+## P1 · ④ 布局
+
+- **307（沿用 75 槽距 +75）不建议。** 单槽内容实测 = 环 33 + 2.5 间隙 + 文本 14 ≈ 50px，75px 槽距里 **~25px 是死空白**（现在 3 槽的 232px 里已有约 40% 空白）。307px 在 1080p 占 28% 屏高、768p 占 40%，遮挡、鼠标行程、贴边热区都变差，换来的只是"不用调参数"。
+- **推荐：压缩槽距，把省下的空间换成一条语义分隔线**（前三槽=当下会话，Codex=周期预算，分组能显著降低"95% 周环"被误读为同类）：
+  - 零尺寸变更：H 保持 **232**，槽距 56，槽心 `(24,80,136,192)`，百分比 top `(43,99,155,211)`（上/下留白 ~7px，槽间净空 6.5px，偏挤）。
+  - **推荐：H≈252**，槽距 60，槽心 `(28,88,148,208)`，Kimi↔Codex 之间放 1px 分隔线（净空 10.5px；想要更舒展可取 256/14px）。只长 20px 就同时拿到第 4 槽和视觉分组。
+- **工程侧先合并常量**：现在 `SLOT_KEYS / SLOT_CENTERS / SLOT_BREAKS / SLOT_PERCENT_TOPS` + `create_widget_image` 里各写一遍，加槽要同步 5 处，而预览脚本已经漂移了。改成单一 `SLOT_SPECS = ((key, center), ...)`，`SLOT_BREAKS` 由相邻槽心取中值推导，`_slot_at` / `_panel_position` 只读这一处。
+- **面板不必加高**：`PANEL_H=64` 的两行 meta 够用——`line_one="周 $15.6/$300"`、`line_two="6天4h后重置 · 今日 $3.2"`，`value_text` 仍是周剩余 %。改面板高会牵动 `_panel_position` 的钳制与命中测试，先别动；月额度放 tooltip。
+
+## P2 · ⑤ 图标与配色
+
+- **花结在 12px 不可辨，且可以量化**：按你脚本的 `petal_r=0.21S、dist=0.29S`，成品下花瓣半径 2.52px、相邻间距 3.48px（重叠 1.5px → 实心并集成一团），花瓣外凸只有 **1.17px**、中心孔直径 **2.4px**；再经缩小，1px 级起伏和 2px 孔糊成"带针眼的凹凸圆饼"。它既不读作花结，也不读作 OpenAI 的编结（上下穿插在这个尺寸根本没画）。要保留此画法，至少把腰深拉到 ≥1.5px、孔拉到 ≥3px（如 `petal_r≈0.19S、dist≈0.335S、孔≈0.155S`），并接受它只是"风格化六瓣花"。
+- **四候选中 C（终端符 ❯_）在 12px 最可辨**：两笔折线、线宽 2px，轮廓与 GLM 五角晶体 / Kimi 星芒 / 番茄沙漏都不撞，语义也对（Codex=编码 CLI）。**D（GPT 字标）不成立**：`size*0.62`≈7.4px 字高、三字母挤在 12px 宽里必糊，而且"GPT"是字标不是 Codex，与图形化的另外三个不一致——留给详情卡标题。B 的形制（白 glyph + 品牌色底盘）是对的，但**别用靛蓝**，它同时贴 GLM 蓝和番茄紫。
+- **配色**：已占用 GLM 蓝 210°、Kimi 绿 140°、番茄紫 275°/teal 190°、告警绿橙红；`OFF_COLOR(142,142,147)` 灰同时是"无数据虚线"和"番茄非工作时段"。所以 **银/灰不能用**（撞虚线无数据）、靛蓝不能用、青不能用（撞 REST teal）、绿橙红不能用（撞 `_draw_quota_badge` 的告警点）。唯一宽敞区间是 **320–335° 洋红/覆盆子**，建议 `#B5179E`/`#C0266E` 一类作环色 + 同色底盘 + 白色 glyph（与 Kimi/番茄"浅 glyph 压色盘"一致）。色盲安全靠位置+形状而非色相，风险可控；另请补上 `draw_percentage` 的告警染色（常量注释写了"数字同步染红"，实现里只用 `TEXT_SUB/TEXT_DIM`）。
+- **预览脚本与 main.py 常量已漂移，用它会误判**：脚本 `SS=10`（主程序 4）、`RAIL_HAIRLINE 46` vs `12`、`OFF_COLOR(120,120,128,190)` vs `(142,142,147,255)`、`TEXT_SUB` 不同、百分比字体 `segoeui.ttf` vs `seguisb.ttf`。请让它 `from main import` 复用常量，并补一条 **1:1 像素**对照（现在 DS=3 放大，对 12px 判断偏乐观）；若你在 125%/150% 缩放下用，也各看一眼。
+
+**落地顺序**：先定 ③ 的 host 授权模型与 ① 的语义（改动小、影响大，且决定后面所有取数代码），再合并 ④ 的 `SLOT_SPECS` 并定 H，最后打磨 ⑤。

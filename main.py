@@ -19,13 +19,14 @@ import time
 import traceback
 import tkinter as tk
 import winreg
+import winsound
 from datetime import datetime, time as dtime
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from winotify import Notification
 
 # pythonw 在无控制台环境（任务计划程序 / 开机自启）下 sys.stdout/stderr 为 None，
@@ -62,7 +63,10 @@ _log_file = open(_LOG_PATH, "a", encoding="utf-8", buffering=1)  # 行缓冲
 sys.stdout = _Tee(sys.stdout, _log_file)
 sys.stderr = _Tee(sys.stderr, _log_file)
 
-REFRESH_INTERVAL = 300  # Token 刷新：5 分钟
+REFRESH_INTERVAL = 300      # 有会话活跃时的刷新间隔：5 分钟
+IDLE_REFRESH_INTERVAL = 600  # 全部源空闲（无会话活动）时降频到 10 分钟
+BACKOFF_BASE = 60           # 429 退避起步秒数，连续触发翻倍
+BACKOFF_CAP = 900           # 退避上限 15 分钟
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"  # 项目本地独立配置（脱离 cc 的兜底）
 # ZCode 的 API 配置（最高优先级，自动跟随其更新）：
@@ -364,6 +368,7 @@ def fetch_usage():
     try:
         with _OPENER.open(req, timeout=10) as resp:
             body = json.loads(resp.read().decode("utf-8"))
+            _gate_reset("glm")
             data = body.get("data") or body
             token_limits = [
                 item for item in data.get("limits", [])
@@ -398,6 +403,7 @@ def fetch_usage():
     except (URLError, OSError, json.JSONDecodeError, KeyError) as exc:
         # OSError 兜住读响应阶段的裸 TimeoutError / socket 错误
         #（urlopen 只把连接阶段超时包成 URLError，读阶段不包装）
+        _gate_report("glm", exc)
         print(f"API 错误: {exc}")
 
     return None
@@ -455,11 +461,13 @@ def fetch_kimi_usage():
         try:
             with _OPENER.open(req, timeout=3) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
-        except (URLError, OSError, json.JSONDecodeError):
+        except (URLError, OSError, json.JSONDecodeError) as exc:
+            _gate_report("kimi", exc)
             continue
         data = body.get("data") or {}
         if data.get("kind") != "ok":
             continue
+        _gate_reset("kimi")
         quota = data.get("quota") or {}
         usages = quota.get("usages") or {}
         limit5h = usages.get("limit5h") or {}
@@ -498,20 +506,71 @@ def fetch_kimi_usage():
 # daily_limit=0 且 mode=unrestricted 表示无日限额——今日已用只进 hover 文本，
 # 没有分母的比例一律不画（伪造读数）。
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-CODEX_CONFIG_PATH = CODEX_HOME / "config.toml"
-CODEX_AUTH_PATH = CODEX_HOME / "auth.json"
 CODEX_USAGE_HOSTS = ("uapi.ccwu.cc",)   # 中转站用量接口白名单（沿用 GLM 的 SSRF 策略）
 CODEX_USAGE_MAX_BYTES = 65536           # 响应体上限：正常几十 KB，防异常流撑爆内存
 
 
-def _codex_usage_url():
-    """从 Codex CLI 配置解析 (usage_url, api_key)；解析不出返回 (None, None)。
+def _discover_codex_profiles():
+    """发现本机 Codex 账号目录：默认 CODEX_HOME 为 ("") 主账号，
+    每个带 auth.json 的 ~/.codex-<slug> 目录追加一个 (slug, 目录) 账号
+    （对齐 Codenotch 的多账号约定：默认在前，其余按字母序，位置固定不互换）。"""
+    profiles = [("", CODEX_HOME)]
+    seen = {CODEX_HOME.resolve()} if CODEX_HOME.exists() else set()
+    try:
+        candidates = sorted(Path.home().glob(".codex-*"))
+    except OSError:
+        return profiles
+    for d in candidates:
+        try:
+            if not d.is_dir() or not (d / "auth.json").exists():
+                continue
+            if d.resolve() in seen:
+                continue
+        except OSError:
+            continue
+        profiles.append((d.name[len(".codex-"):], d))
+    return profiles
+
+
+CODEX_PROFILES = _discover_codex_profiles()
+
+# ── 429 退避门控 ─────────────────────────────────────────────────────
+# 每个源独立的退避状态：连续 429 时 60s 起步指数翻倍、封顶 15 分钟，
+# 退避截止前该源的刷新直接跳过，不再空发注定被拒的请求。
+_fetch_gates = {}
+_gates_lock = threading.Lock()
+
+
+def _gate_allows(source):
+    with _gates_lock:
+        return time.time() >= _fetch_gates.get(source, {}).get("until", 0)
+
+
+def _gate_report(source, exc):
+    """抓取返回后登记结果：HTTPError 429 升一级退避，其他结果保持不变。
+    成功响应由调用方显式调用 _gate_reset 清零。"""
+    if not isinstance(exc, HTTPError) or exc.code != 429:
+        return
+    with _gates_lock:
+        gate = _fetch_gates.setdefault(source, {"until": 0, "delay": BACKOFF_BASE})
+        gate["until"] = time.time() + gate["delay"]
+        gate["delay"] = min(gate["delay"] * 2, BACKOFF_CAP)
+    print(f"{source} 触发 429，退避 {gate['delay']} 秒")
+
+
+def _gate_reset(source):
+    with _gates_lock:
+        _fetch_gates.pop(source, None)
+
+
+def _codex_usage_url(home=CODEX_HOME):
+    """从指定 Codex 账号目录的 CLI 配置解析 (usage_url, api_key)；解析不出返回 (None, None)。
 
     URL 安全校验沿用 GLM 源策略：https + 域名白名单 + DNS 解析后逐 IP 阻断
     私网/环回/链路本地/保留地址；_OPENER 已禁重定向，Bearer key 不会被带往
     其他主机。"""
     try:
-        key = json.loads(CODEX_AUTH_PATH.read_text(encoding="utf-8")).get(
+        key = json.loads((home / "auth.json").read_text(encoding="utf-8")).get(
             "OPENAI_API_KEY", "")
     except (json.JSONDecodeError, OSError):
         return None, None
@@ -523,7 +582,7 @@ def _codex_usage_url():
 
     import tomllib
     try:
-        with open(CODEX_CONFIG_PATH, "rb") as f:
+        with open(home / "config.toml", "rb") as f:
             cfg = tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError):
         return None, None
@@ -566,12 +625,12 @@ def _codex_weekly_reset_ts(window_start):
     return reset_ts
 
 
-def fetch_codex_usage():
-    """读取 Codex 中转订阅的周/月 USD 额度，返回 dict 或 None。
+def fetch_codex_usage(home=CODEX_HOME, source="codex"):
+    """读取指定 Codex 账号的中转订阅周/月 USD 额度，返回 dict 或 None。
 
     未配置 / 域名不认识 / key 失效 / 网络失败统一返回 None，界面按无数据
     处理（虚线空环 + "--"），沿用既有的"不伪造读数"约定。"""
-    url, key = _codex_usage_url()
+    url, key = _codex_usage_url(home)
     if not url:
         return None
     req = Request(url, headers={
@@ -584,6 +643,7 @@ def fetch_codex_usage():
         if len(raw) > CODEX_USAGE_MAX_BYTES:
             print("Codex 用量响应超过大小上限，已丢弃")
             return None
+        _gate_reset(source)
         body = json.loads(raw.decode("utf-8"))
         sub = body.get("subscription") or {}
         weekly_limit = sub.get("weekly_limit_usd") or 0
@@ -613,8 +673,124 @@ def fetch_codex_usage():
         }
     except (URLError, OSError, json.JSONDecodeError, ValueError,
             TypeError) as exc:
+        _gate_report(source, exc)
         print(f"Codex 用量错误: {exc}")
         return None
+
+
+# ── 会话活动检测（闲忙状态）───────────────────────────────────────────
+# 借鉴 Codenotch 的会话状态可视化：各源忙闲不看 API，看本机 CLI 的会话文件
+# 写入信号——rollout / event jsonl 持续写入即「忙」，停写但进程还在即
+# 「阻塞等待输入」，进程消失或长期静默即「空闲」。只做本地只读 stat，
+# 不读文件内容，不碰会话数据本身。
+ACTIVITY_BUSY_WINDOW = 90          # 会话文件多少秒内有写入 → 忙
+ACTIVITY_BLOCKED_WINDOW = 15 * 60  # 停写后多久内进程仍在 → 阻塞等待
+ACTIVITY_SCAN_INTERVAL = 2.0       # 后台扫描周期（秒）
+
+
+def _activity_watchers():
+    """每个额度源的活动信号：(会话文件 glob 目录列表, 进程映像名关键字)。
+
+    - GLM：Claude Code 走 GLM 中转，会话写在 ~/.claude/projects/**/*.jsonl
+    - Kimi：Kimi Code daemon 的会话事件流 server/events/session_*.jsonl
+    - Codex：各账号目录 sessions/**/rollout-*.jsonl（slug 账号各自独立）
+    """
+    watchers = {
+        "glm": ([Path.home() / ".claude" / "projects"], ("claude",)),
+        "kimi": ([KIMI_HOME / "server" / "events"], ("kimi",)),
+    }
+    for slug, home in CODEX_PROFILES:
+        key = "codex" if not slug else f"codex:{slug}"
+        watchers[key] = ([home / "sessions"], ("codex",))
+    return watchers
+
+
+class _PROCESSENTRY32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", ctypes.c_ulong),
+        ("cntUsage", ctypes.c_ulong),
+        ("th32ProcessID", ctypes.c_ulong),
+        ("th32DefaultHeapID", ctypes.c_void_p),
+        ("th32ModuleID", ctypes.c_ulong),
+        ("cntThreads", ctypes.c_ulong),
+        ("th32ParentProcessID", ctypes.c_ulong),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", ctypes.c_ulong),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+_proc_cache = (0.0, frozenset())
+
+
+def _running_process_names():
+    """当前进程映像名小写集合（Toolhelp32 快照，ctypes 直读无子进程开销），
+    结果缓存 5 秒——活动扫描周期 2 秒，进程生灭不需要更高精度。"""
+    global _proc_cache
+    now = time.time()
+    if now - _proc_cache[0] < 5:
+        return _proc_cache[1]
+    names = set()
+    kernel32 = ctypes.windll.kernel32
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if snapshot and snapshot != ctypes.c_void_p(-1).value:
+        entry = _PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(entry)
+        # 必须显式用 W 版：缺省解析到 ANSI 的 Process32First，宽字符字段会
+        # 读出两两拼错的乱码进程名（'n','o' 拼成 U+6F6E），匹配永远落空
+        if kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            while True:
+                names.add(entry.szExeFile.lower())
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+        kernel32.CloseHandle(snapshot)
+    _proc_cache = (now, frozenset(names))
+    return _proc_cache[1]
+
+
+def _newest_mtime(dirs, suffix):
+    """目录树内指定后缀文件的最新 mtime（epoch 秒）；无文件返回 0。"""
+    newest = 0.0
+    for root in dirs:
+        try:
+            for dirpath, _dirnames, filenames in os.walk(root):
+                for name in filenames:
+                    if not name.endswith(suffix):
+                        continue
+                    try:
+                        mtime = os.path.getmtime(os.path.join(dirpath, name))
+                    except OSError:
+                        continue
+                    if mtime > newest:
+                        newest = mtime
+        except OSError:
+            continue
+    return newest
+
+
+def scan_activity_states():
+    """扫描全部源的活动状态，返回 {源 key: "busy" | "blocked" | "idle"}。
+
+    busy：会话文件 90 秒内有写入（agent 正在跑）；
+    blocked：停写未超 15 分钟且对应 CLI 进程仍在（大概率在等你输入）；
+    idle：其余。进程名按关键字子串匹配（如 "codex" 命中 codex.exe）。
+    """
+    now = time.time()
+    states = {}
+    procs = None
+    for key, (dirs, proc_keywords) in _activity_watchers().items():
+        age = now - _newest_mtime(dirs, ".jsonl")
+        if age <= ACTIVITY_BUSY_WINDOW:
+            states[key] = "busy"
+            continue
+        if age <= ACTIVITY_BLOCKED_WINDOW:
+            if procs is None:
+                procs = _running_process_names()
+            if any(kw in name for kw in proc_keywords for name in procs):
+                states[key] = "blocked"
+                continue
+        states[key] = "idle"
+    return states
 
 
 # ── 番茄钟作息推导 ────────────────────────────────────────────────────
@@ -787,13 +963,17 @@ def _load_font(candidates, size, weight=None):
 
 
 # ── UI 规格（紧凑状态轨：品牌图标 + 短期额度 / 周预算 / 番茄阶段圆环）──
-WIDGET_W, WIDGET_H = 44, 252
+WIDGET_W = 44
 RAIL_RADIUS = WIDGET_W // 2
-# 槽位规格单一来源：key + 圆环中心 y，其余（hover 命中分界 / 百分比文字顶）
-# 全部由它推导——加槽只改这一处，不再五处同步。
-# v1.28 四槽紧凑布局：GLM、Kimi、Codex、番茄，槽距 60 比旧 75 紧凑，
-# 总高 252 而非 307。
-SLOT_SPECS = (("glm", 28), ("kimi", 88), ("codex", 148), ("pomo", 208))
+# 槽位规格单一来源：key 列表 + 槽距推导中心 y，其余（hover 命中分界 /
+# 百分比文字顶 / 总高）全部由它推导——加槽只改这一处，不再五处同步。
+# Codex 多账号（~/.codex-<slug>）各占一槽，位置固定不互换。
+SLOT_LAYOUT = (["glm", "kimi"]
+               + ["codex" if not slug else f"codex:{slug}"
+                  for slug, _ in CODEX_PROFILES]
+               + ["pomo"])
+SLOT_SPECS = tuple((key, 28 + 60 * i) for i, key in enumerate(SLOT_LAYOUT))
+WIDGET_H = 60 * len(SLOT_LAYOUT) + 12
 SLOT_KEYS = tuple(key for key, _ in SLOT_SPECS)
 SLOT_CENTERS = tuple(center for _, center in SLOT_SPECS)
 SLOT_BREAKS = tuple((a[1] + b[1]) // 2 for a, b in zip(SLOT_SPECS, SLOT_SPECS[1:]))
@@ -965,12 +1145,31 @@ def _draw_quota_badge(d, cx, cy, radius, remaining):
     d.ellipse([x - badge_r, y - badge_r, x + badge_r, y + badge_r], fill=color)
 
 
-def create_widget_image(glm, kimi, codex, pomo, dim, glass=False):
-    """生成窄幅状态轨：GLM、Kimi、Codex 与番茄阶段四枚图标圆环。
+def _draw_activity_overlay(d, cx, cy, radius, state, now):
+    """会话闲忙可视化（借鉴 Codenotch）：
+    - busy：环内细弧旋转（角度随墙钟推进，帧率无关）
+    - blocked：环外琥珀色脉冲环（alpha 正弦调制，等你输入）
+    idle 不画。叠加在额度环之上，不改变额度语义。"""
+    s = SS
+    if state == "busy":
+        r = radius - 5.5 * s
+        start = (now * 140) % 360 - 90
+        d.arc([cx - r, cy - r, cx + r, cy + r],
+              start, start + 100, fill=(255, 255, 255, 220),
+              width=max(1, round(1.5 * s)))
+    elif state == "blocked":
+        r = radius + 3.5 * s
+        alpha = int(110 + 110 * (0.5 + 0.5 * math.sin(2 * math.pi * now / 1.6)))
+        d.ellipse([cx - r, cy - r, cx + r, cy + r],
+                  outline=ORANGE[:3] + (alpha,), width=max(1, round(1.5 * s)))
+
+
+def create_widget_image(values, pomo, dim, activity=None, glass=False):
+    """生成窄幅状态轨：GLM、Kimi、Codex（可多账号）与番茄阶段图标圆环。
 
     主轨只呈现各源最关键的一格读数（GLM/Kimi 短期额度、Codex 周预算、当前
     番茄阶段）；重置、周/月额度和精确读数保留在 hover 详情面板中。每个图标
-    下方显示对应剩余比例。"""
+    下方显示对应剩余比例。activity 给出各额度源的会话闲忙态叠加。"""
     s = SS
     cw, ch = WIDGET_W * s, WIDGET_H * s
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
@@ -982,10 +1181,8 @@ def create_widget_image(glm, kimi, codex, pomo, dim, glass=False):
     cx = cw / 2
     radius, stroke = 15 * s, 3 * s
     glyph_size = 12 * s
-    glm_remaining = glm["remaining"]
-    kimi_remaining = kimi["remaining"]
-    codex_remaining = codex["remaining"]
-    slot_centers = tuple(value * s for value in SLOT_CENTERS)
+    activity = activity or {}
+    now = time.time()
     pct_font = _load_font(NUM_FONT, 11 * s)
 
     def draw_percentage(y, value):
@@ -995,49 +1192,49 @@ def create_widget_image(glm, kimi, codex, pomo, dim, glass=False):
         d.text((cx - (bbox[2] - bbox[0]) / 2 - bbox[0], y * s - bbox[1]),
                text, font=pct_font, fill=color)
 
-    _draw_ring(d, cx, slot_centers[0], radius, stroke,
-               0 if glm_remaining is None else glm_remaining / 100,
-               GLM_BLUE, no_data=glm_remaining is None)
-    _draw_icon_disc(d, cx, slot_centers[0], glyph_size * 0.75, GLM_BLUE)
-    _draw_glm_mark(d, cx, slot_centers[0], glyph_size)
-    _draw_quota_badge(d, cx, slot_centers[0], radius, glm_remaining)
-    draw_percentage(SLOT_PERCENT_TOPS[0], glm_remaining)
-
-    _draw_ring(d, cx, slot_centers[1], radius, stroke,
-               0 if kimi_remaining is None else kimi_remaining / 100,
-               KIMI_GREEN, no_data=kimi_remaining is None)
-    if kimi_remaining is None:
-        d.line([(cx - glyph_size * 0.28, slot_centers[1]),
-                (cx + glyph_size * 0.28, slot_centers[1])],
+    def draw_no_data_dash(cy):
+        d.line([(cx - glyph_size * 0.28, cy), (cx + glyph_size * 0.28, cy)],
                fill=OFF_COLOR, width=max(2, s))
-    else:
-        _draw_icon_disc(d, cx, slot_centers[1], glyph_size * 0.75, KIMI_GREEN)
-        _draw_kimi_mark(d, cx, slot_centers[1], glyph_size)
-    _draw_quota_badge(d, cx, slot_centers[1], radius, kimi_remaining)
-    draw_percentage(SLOT_PERCENT_TOPS[1], kimi_remaining)
 
-    _draw_ring(d, cx, slot_centers[2], radius, stroke,
-               0 if codex_remaining is None else codex_remaining / 100,
-               CODEX_MAGENTA, no_data=codex_remaining is None)
-    if codex_remaining is None:
-        d.line([(cx - glyph_size * 0.28, slot_centers[2]),
-                (cx + glyph_size * 0.28, slot_centers[2])],
-               fill=OFF_COLOR, width=max(2, s))
-    else:
-        _draw_icon_disc(d, cx, slot_centers[2], glyph_size * 0.75, CODEX_DISC)
-        _draw_codex_mark(d, cx, slot_centers[2], glyph_size)
-    _draw_quota_badge(d, cx, slot_centers[2], radius, codex_remaining)
-    draw_percentage(SLOT_PERCENT_TOPS[2], codex_remaining)
+    for i, key in enumerate(SLOT_KEYS):
+        cy = SLOT_CENTERS[i] * s
+        if key == "pomo":
+            stage_color = _stage_color(pomo["stage"])
+            if dim:
+                stage_color = stage_color[:3] + (int(255 - 145 * dim),)
+            _draw_ring(d, cx, cy, radius, stroke, pomo["progress"], stage_color)
+            _draw_icon_disc(d, cx, cy, glyph_size * 0.75, stage_color)
+            _draw_pomodoro_mark(d, cx, cy, glyph_size, (248, 248, 250, 255))
+            draw_percentage(SLOT_PERCENT_TOPS[i], pomo["progress"] * 100)
+            continue
 
-    stage = pomo["stage"]
-    stage_color = _stage_color(stage)
-    if dim:
-        stage_color = stage_color[:3] + (int(255 - 145 * dim),)
-    _draw_ring(d, cx, slot_centers[3], radius, stroke,
-               pomo["progress"], stage_color)
-    _draw_icon_disc(d, cx, slot_centers[3], glyph_size * 0.75, stage_color)
-    _draw_pomodoro_mark(d, cx, slot_centers[3], glyph_size, (248, 248, 250, 255))
-    draw_percentage(SLOT_PERCENT_TOPS[3], pomo["progress"] * 100)
+        remaining = values.get(key)
+        if key == "glm":
+            ring_color, disc_color = GLM_BLUE, GLM_BLUE
+        elif key == "kimi":
+            ring_color, disc_color = KIMI_GREEN, KIMI_GREEN
+        else:  # codex 及各 slug 账号
+            ring_color, disc_color = CODEX_MAGENTA, CODEX_DISC
+        _draw_ring(d, cx, cy, radius, stroke,
+                   0 if remaining is None else remaining / 100,
+                   ring_color, no_data=remaining is None)
+        if remaining is None:
+            if key != "glm":  # GLM 加载态默认满电，无数据横线只用于 Kimi/Codex
+                draw_no_data_dash(cy)
+            else:
+                _draw_icon_disc(d, cx, cy, glyph_size * 0.75, disc_color)
+                _draw_glm_mark(d, cx, cy, glyph_size)
+        else:
+            _draw_icon_disc(d, cx, cy, glyph_size * 0.75, disc_color)
+            if key == "glm":
+                _draw_glm_mark(d, cx, cy, glyph_size)
+            elif key == "kimi":
+                _draw_kimi_mark(d, cx, cy, glyph_size)
+            else:
+                _draw_codex_mark(d, cx, cy, glyph_size)
+        _draw_quota_badge(d, cx, cy, radius, remaining)
+        _draw_activity_overlay(d, cx, cy, radius, activity.get(key), now)
+        draw_percentage(SLOT_PERCENT_TOPS[i], remaining)
 
     return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
 
@@ -1078,28 +1275,35 @@ def create_detail_image(info, target, glass=False):
     d.line([(14 * s, 2 * s), ((PANEL_W - 14) * s, 2 * s)],
            fill=TOP_LIGHT, width=s)
 
-    def reset_text(left):
-        if left is None:
+    clock_mode = info.get("reset_clock")  # 重置时间显示：False 倒计时 / True 时刻
+
+    def reset_text(ts):
+        if not ts:
             return "等待同步"
-        hours, remainder = divmod(max(0, int(left)), 3600)
+        if clock_mode:
+            return f"重置 {datetime.fromtimestamp(ts).strftime('%H:%M')}"
+        left = max(0, int(ts - time.time()))
+        hours, remainder = divmod(left, 3600)
         return f"重置 {hours}h{remainder // 60:02d}m"
 
     if target == "glm":
         value = info["glm_remaining"]
         title, accent = "GLM 用量", GLM_BLUE
         line_one = f"周额度 {info['glm_weekly']:.0f}%"
-        line_two = reset_text(info["glm_reset_left"])
+        line_two = reset_text(info["glm_reset_ts"])
         meta_x = 84
     elif target == "kimi":
         value = info["kimi_remaining"]
         title, accent = "Kimi 用量", KIMI_GREEN
         monthly = info["kimi_monthly"]
         line_one = "月额度 --" if monthly is None else f"月额度 {monthly:.0f}%"
-        line_two = reset_text(info["kimi_reset_left"])
+        line_two = reset_text(info["kimi_reset_ts"])
         meta_x = 84
-    elif target == "codex":
+    elif target.startswith("codex"):
+        slug = target.split(":", 1)[1] if ":" in target else ""
         value = info["codex_remaining"]
-        title, accent = "Codex 用量", CODEX_MAGENTA
+        title = "Codex 用量" if not slug else f"Codex·{slug}"
+        accent = CODEX_MAGENTA
         # 中转额度是 USD 计价：主数值是周预算剩余比例，配行给绝对值与今日消耗。
         # 无日限（daily_limit=0 + unrestricted）没有分母，绝不折算成比例，只以
         # 文字标注；月额度放窗口 tooltip。meta 起点比其他卡左移（数值列最宽
@@ -1108,11 +1312,13 @@ def create_detail_image(info, target, glass=False):
         line_one = (f"周 ${info['codex_weekly_used']:.1f}"
                     f"/${info['codex_weekly_limit']:.0f}")
         today = info.get("codex_today_cost")
-        left = info.get("codex_reset_left")
-        if left is None:
+        ts = info.get("codex_reset_ts") or 0
+        if not ts:
             reset = "等待窗口"
+        elif clock_mode:
+            reset = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
         else:
-            days, rem = divmod(max(0, int(left)), 86400)
+            days, rem = divmod(max(0, int(ts - time.time())), 86400)
             reset = f"{days}天{rem // 3600}h"
         line_two = (f"{reset} · 今日 ${today:.1f}"
                     if today is not None else reset)
@@ -1133,7 +1339,69 @@ def create_detail_image(info, target, glass=False):
     d.text((meta_x * s, 23 * s), line_one, font=meta_font, fill=TEXT_SUB)
     d.text((meta_x * s, 40 * s), line_two, font=meta_font, fill=TEXT_DIM)
 
+    if info.get("pinned"):
+        # 钉住标记：右上角小圆点（再点一次面板解除）
+        r = 2.5 * s
+        d.ellipse([cw - 12 * s - r, 9 * s - r, cw - 12 * s + r, 9 * s + r],
+                  fill=accent)
+
     return img.resize((PANEL_W, PANEL_H), Image.LANCZOS)
+
+
+# ── 苹果风右键菜单（自绘，替代系统 tk.Menu）───────────────────────────
+MENU_ITEM_H = 26    # 菜单项行高
+MENU_SEP_H = 9      # 分隔线区高度
+MENU_PAD_X = 12     # 文字左右留白
+MENU_PAD_Y = 6      # 卡片上下内边距
+MENU_SHADOW = 8     # 投影边距（窗口比卡片大一圈）
+
+
+def create_menu_image(labels, hover=-1):
+    """macOS 风右键菜单：圆角暗色卡片 + 发丝描边 + 顶部内高光 + 柔和投影，
+    悬停项为苹果蓝圆角高亮条；labels 中 None 表示分隔线。
+    返回 (图像, (卡片宽, 卡片高, 阴影边距))。"""
+    s = SS
+    font = _load_font(ZH_FONT, 10 * s, ZH_WEIGHT)
+    text_w = max((font.getlength(t) for t in labels if t), default=0)
+    w = math.ceil(text_w / s) + 2 * MENU_PAD_X + 14  # 文字 + 留白 + 右侧余量
+    rows_h = sum(MENU_SEP_H if t is None else MENU_ITEM_H for t in labels)
+    h = rows_h + 2 * MENU_PAD_Y
+    cw, ch = (w + 2 * MENU_SHADOW) * s, (h + 2 * MENU_SHADOW) * s
+    img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+
+    # 柔和投影：偏移深色圆角矩形 + 高斯模糊，垫在卡片之下
+    sh = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+    x0, y0 = MENU_SHADOW * s, MENU_SHADOW * s
+    x1, y1 = x0 + w * s - 1, y0 + h * s - 1
+    ImageDraw.Draw(sh).rounded_rectangle(
+        [x0, y0 + 2 * s, x1, y1 + 2 * s], radius=10 * s, fill=(0, 0, 0, 110))
+    img.alpha_composite(sh.filter(ImageFilter.GaussianBlur(3 * s)))
+
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([x0, y0, x1, y1], radius=10 * s,
+                        fill=(26, 26, 30, 242), outline=HAIRLINE, width=2)
+    d.line([(x0 + 10 * s, y0 + 2 * s), (x1 - 10 * s, y0 + 2 * s)],
+           fill=TOP_LIGHT, width=s)
+
+    ty = y0 + MENU_PAD_Y * s
+    for i, text in enumerate(labels):
+        if text is None:
+            cy = ty + MENU_SEP_H * s // 2
+            d.line([(x0 + 10 * s, cy), (x1 - 10 * s, cy)],
+                   fill=HAIRLINE, width=max(1, s // 2))
+            ty += MENU_SEP_H * s
+            continue
+        if i == hover:
+            d.rounded_rectangle([x0 + 4 * s, ty, x1 - 4 * s, ty + MENU_ITEM_H * s],
+                                radius=6 * s, fill=(10, 132, 255, 255))
+        bbox = d.textbbox((0, 0), text, font=font)
+        d.text((x0 + MENU_PAD_X * s,
+                ty + (MENU_ITEM_H * s - (bbox[3] - bbox[1])) / 2 - bbox[1]),
+               text, font=font, fill=(245, 245, 247, 255))
+        ty += MENU_ITEM_H * s
+
+    out_w, out_h = w + 2 * MENU_SHADOW, h + 2 * MENU_SHADOW
+    return img.resize((out_w, out_h), Image.LANCZOS), (w, h, MENU_SHADOW)
 
 
 # ── Win32 分层窗口渲染 ────────────────────────────────────────────────
@@ -1253,7 +1521,8 @@ class GLMWidget:
         # 窗口尺寸 & 位置：优先恢复上次停靠位置与侧别（ui_state.json，所在屏
         # 已拔则丢弃），首次启动贴「鼠标所在屏」右缘（悬空 8px、竖直居中）
         self._win_w, self._win_h = WIDGET_W, WIDGET_H
-        x, y, self._side = self._restore_pos()
+        persisted = self._load_state()
+        x, y, self._side = self._restore_pos(persisted)
         if x is None:
             rect = (monitor_rect_at_point(*self.root.winfo_pointerxy())
                     or (0, 0, self.root.winfo_screenwidth(),
@@ -1267,19 +1536,23 @@ class GLMWidget:
         # 注意：3.13+ 新版 Tk 的 winfo_id() 返回 TkChild 子窗口，分层窗口必须挂顶层
         self._hwnd = self._toplevel_hwnd(int(self.root.winfo_id()))
 
-        # 右键菜单
-        self._menu = tk.Menu(self.root, tearoff=0)
-        self._menu.add_command(label="立即刷新", command=self._do_refresh)
-        self._menu.add_command(label="开机自启（点击切换）", command=self._toggle_autostart)
-        self._menu.add_separator()
-        self._menu.add_command(label="退出", command=self._quit)
-        self.root.bind("<Button-3>", lambda e: self._menu.tk_popup(e.x_root, e.y_root))
+        # 右键菜单：自绘 macOS 风分层窗口（create_menu_image），非系统菜单
+        self._menu_win = None       # 菜单窗口（lazy 创建）
+        self._menu_hwnd = None
+        self._menu_items = []       # 当前菜单文案（None = 分隔线）
+        self._menu_cmds = []        # 与文案对应的命令
+        self._menu_hover = -1       # 当前悬停项索引
+        self._menu_geo = None       # (卡片宽, 卡片高, 阴影边距)
+        self._menu_armed = False    # 点击外关闭预备：右键松开后才武装，
+                                    # 否则按住右键 >150ms 菜单刚开就被自己关掉
+        self.root.bind("<Button-3>", self._popup_menu)
 
-        # 拖拽
+        # 拖拽 + 点击刷新：按下记位置，松开时位移小于阈值视为点击槽位
         self.root.bind("<Button-1>", self._drag_start)
         self.root.bind("<B1-Motion>", self._drag_move)
         self.root.bind("<ButtonRelease-1>", self._drag_end)
         self._drag_x = self._drag_y = 0
+        self._press_xy = None       # 按下时的屏幕坐标（点击判定用）
         self._dragging = False
 
         # 贴边隐藏 + hover 详情面板状态
@@ -1289,34 +1562,65 @@ class GLMWidget:
         self._panel = None            # 详情面板窗口（lazy 创建）
         self._panel_visible = False
         self._panel_target = None
+        self._panel_pinned = False    # 点击详情卡钉住（Keep open），再点解除
+        self._panel_animating = False  # 详情卡弹出动画进行中
         self._hover_target = None
         self._hover_since = None      # 指针进入当前项的时刻（面板延迟用）
         self._panel_leave_since = None
         self._leave_since = None      # 指针离开的时刻（隐藏延迟用）
         self._born = time.time()      # 启动宽限期（BOOT_GRACE 内不自动隐藏）
         self._last_refresh = "--"
+        self._peek_until = 0.0        # 会话结束提醒：临时滑出截止时刻
 
-        # 状态：GLM（短期 Token 剩余 + 周额度剩余 + 短期窗口重置点）+ Kimi + 番茄钟
-        self._token_remaining = 100  # 加载态显示满电，API 返回后更新
-        self._weekly_remaining = 100.0  # 周额度剩余比例，仅在详情面板呈现
-        self._quota_reset_ts = 0.0   # 短期窗口重置时刻（epoch 秒），0 = 尚无数据
-        self._kimi_remaining = None  # Kimi 短期剩余；None = 无数据（daemon 未跑）
-        self._kimi_reset_ts = 0.0
-        self._kimi_monthly_remaining = None  # Kimi 月额度剩余；None = 无数据
-        self._codex_remaining = None  # Codex 周预算剩余；None = 无数据（未配置/失败）
-        self._codex_reset_ts = 0.0    # 周窗口预计重置时刻（epoch 秒），0 = 推算不出
-        self._codex_weekly = (0.0, 0.0)  # (已用 USD, 上限 USD)，详情卡绝对值
-        self._codex_today_cost = None    # 今日已用 USD；None = 无数据
-        self._codex_monthly_remaining = None  # Codex 月额度剩余；仅 tooltip
-        self._codex_unrestricted = False    # 无日限额（daily_limit=0 + unrestricted）
+        # 持久化状态（ui_state.json）：位置 / 开关 / 告警带 / 各源最后读数
+        self._keep_open = bool(persisted.get("keep_open"))
+        self._reset_clock = bool(persisted.get("reset_clock"))
+        self._alert_bands = persisted.get("alert_bands", {})
+        self._state_dirty = False
+        self._state_saved_at = 0.0
+
+        # 状态：GLM（短期 Token 剩余 + 周额度剩余 + 短期窗口重置点）+ Kimi
+        # + Codex（可多账号，slug → 读数 dict）+ 番茄钟。
+        # 启动先用上次落盘的读数（跨启动保留最后读数，对齐 Codenotch UsageStore），
+        # 首个刷新周期（5 分钟）内被真实数据替换；reset_ts 已过期的不恢复。
+        saved = persisted.get("readings", {})
+        now = time.time()
+        glm_saved = saved.get("glm") or {}
+        self._token_remaining = glm_saved.get("remaining", 100)
+        self._weekly_remaining = glm_saved.get("weekly", 100.0)
+        self._quota_reset_ts = (glm_saved.get("reset_ts", 0)
+                                if glm_saved.get("reset_ts", 0) > now else 0.0)
+        kimi_saved = saved.get("kimi") or {}
+        self._kimi_remaining = kimi_saved.get("remaining")
+        self._kimi_reset_ts = (kimi_saved.get("reset_ts", 0)
+                               if kimi_saved.get("reset_ts", 0) > now else 0.0)
+        self._kimi_monthly_remaining = kimi_saved.get("monthly")
+        codex_saved = saved.get("codex") or {}
+        self._codex = {}
+        for slug, _home in CODEX_PROFILES:
+            c = codex_saved.get(slug) or {}
+            reset_ts = c.get("reset_ts", 0)
+            self._codex[slug] = {
+                "remaining": c.get("remaining"),
+                "reset_ts": reset_ts if reset_ts and reset_ts > now else 0.0,
+                "weekly": tuple(c.get("weekly", (0.0, 0.0))),
+                "today_cost": c.get("today_cost"),
+                "monthly": c.get("monthly"),
+                "unrestricted": bool(c.get("unrestricted", False)),
+            }
         self._pomo = _pomo_state()
         self._dim = 0.0           # 番茄钟闪烁调光系数 0~1（正弦淡出）
         self._blinking = False
+        # 会话闲忙状态：{源 key: busy/blocked/idle}，后台线程 2 秒一扫；
+        # 忙→闲跳变触发「会话结束」提醒（滑出 5 秒 + 提示音）
+        self._activity = {}
+        self._activity_anim = False  # 闲忙叠加动画循环是否在跑
         # 数值缓动动画：_disp 为当前显示值，_targets 为目标值，
         # 每次刷新后 30fps 指数趋近（ease-out 观感），收敛即停，平时零开销
         self._disp = {}
         self._targets = {}
         self._animating = False
+        self._refresh_timer = None  # 全局唯一全源刷新链（_schedule 维护）
 
         # 主轨先以 PIL 渲染一帧；局部详情卡片另行启用 Acrylic。
         self._glass = False
@@ -1352,7 +1656,9 @@ class GLMWidget:
     # 拖拽 ----------------------------------------------------------
     def _drag_start(self, event):
         self._drag_x, self._drag_y = event.x, event.y
+        self._press_xy = (event.x_root, event.y_root)
         self._dragging = True
+        self._dismiss_menu()
         if self._panel_visible:
             self._hide_panel()
 
@@ -1361,8 +1667,16 @@ class GLMWidget:
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
 
-    def _drag_end(self, _event):
+    def _drag_end(self, event):
         self._dragging = False
+        # 按下-松开位移小于 5px 视为点击而非拖拽：点击槽位只刷新对应源
+        if self._press_xy is not None:
+            dx = event.x_root - self._press_xy[0]
+            dy = event.y_root - self._press_xy[1]
+            self._press_xy = None
+            if dx * dx + dy * dy < 25:
+                self._refresh_source(self._slot_at(event.y))
+                return
         if self._hidden or self._sliding_out:
             # 拽着细边拖动后松手：就地恢复整卡视觉并按落点归位，
             # 否则 6px 细条会悬在屏中间既唤不出也不贴边
@@ -1377,7 +1691,7 @@ class GLMWidget:
                 self._side = ("left"
                               if x - rect[0] <= rect[2] - (x + self._win_w)
                               else "right")
-        self._save_pos()
+        self._save_state()
 
     def _monitor_rect(self):
         """卡片所在屏矩形。锚点取停靠侧可见的窗口内缘而非窗口矩形：隐藏态
@@ -1389,38 +1703,82 @@ class GLMWidget:
         return (monitor_rect_at_point(anchor_x, y + self._win_h // 2)
                 or monitor_rect_of_hwnd(self._hwnd))
 
-    # 位置记忆 --------------------------------------------------------
-    def _save_pos(self):
-        """记住当前停靠位置与侧别（隐藏/滑出中态归一为展开位），重启后原位回归"""
+    # 状态持久化（位置 + 停靠侧 + 开关 + 告警带 + 最后读数）------------------
+    def _load_state(self):
+        """读取 ui_state.json 全部持久化字段；文件缺失/损坏返回空 dict。"""
+        try:
+            with open(UI_STATE_PATH, encoding="utf-8") as f:
+                state = json.load(f)
+            return state if isinstance(state, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_state(self, throttle=False):
+        """落盘持久化状态（隐藏/滑出中态位置归一为展开位）。
+        throttle=True 时 60 秒内最多写一次（刷新成功后的读数保存走此路径）。"""
+        now = time.time()
+        if throttle:
+            if now - self._state_saved_at < 60:
+                self._state_dirty = True
+                return
         x, y = self.root.winfo_x(), self.root.winfo_y()
         if self._hidden or self._sliding_out:
             rect = self._monitor_rect()
             if rect:
                 x = (rect[0] + 8 if self._side == "left"
                      else rect[2] - self._win_w - 8)
+        state = {
+            "x": x, "y": y,
+            "side": self._side,
+            "keep_open": self._keep_open,
+            "reset_clock": self._reset_clock,
+            "alert_bands": self._alert_bands,
+            "readings": {
+                "glm": {
+                    "remaining": self._token_remaining,
+                    "weekly": self._weekly_remaining,
+                    "reset_ts": self._quota_reset_ts,
+                },
+                "kimi": {
+                    "remaining": self._kimi_remaining,
+                    "reset_ts": self._kimi_reset_ts,
+                    "monthly": self._kimi_monthly_remaining,
+                },
+                "codex": {
+                    slug: {
+                        "remaining": c["remaining"],
+                        "reset_ts": c["reset_ts"],
+                        "weekly": list(c["weekly"]),
+                        "today_cost": c["today_cost"],
+                        "monthly": c["monthly"],
+                        "unrestricted": c["unrestricted"],
+                    }
+                    for slug, c in self._codex.items()
+                },
+            },
+        }
         try:
             # 固定写项目内 ui_state.json；resolve 后显式断言仍在项目目录，
             # 把「路径由 __file__ 派生、无外部输入」的隐式约束变成运行时保证
-            state = UI_STATE_PATH.resolve()
+            path = UI_STATE_PATH.resolve()
             project_dir = Path(__file__).resolve().parent
-            if project_dir not in state.parents:
+            if project_dir not in path.parents:
                 raise OSError("状态文件越出项目目录，拒绝写入")
-            state.write_text(json.dumps({"x": x, "y": y, "side": self._side}),
-                             encoding="utf-8")
+            path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            self._state_saved_at = now
+            self._state_dirty = False
         except OSError:
-            pass  # 位置记忆写失败不影响运行
+            pass  # 状态写失败不影响运行
 
-    def _restore_pos(self):
+    def _restore_pos(self, persisted):
         """读取上次位置与停靠侧；所在屏已不在线（拔掉/改布局）则返回
         (None, None, "right") 走默认。旧版 ui_state.json 没有 side 字段，
         按右停靠兼容（v1.24 及之前只有右缘贴边）"""
         try:
-            with open(UI_STATE_PATH, encoding="utf-8") as f:
-                pos = json.load(f)
-            x, y = int(pos["x"]), int(pos["y"])
-        except (OSError, KeyError, TypeError, ValueError):
+            x, y = int(persisted["x"]), int(persisted["y"])
+        except (KeyError, TypeError, ValueError):
             return None, None, "right"
-        side = pos.get("side", "right")
+        side = persisted.get("side", "right")
         if side not in ("left", "right"):
             side = "right"
         # 用窗口中心点校验：记忆位置必须落在一块当前在线的屏上
@@ -1492,14 +1850,17 @@ class GLMWidget:
             else:
                 in_zone = sw - 16 <= px < sw
                 reveal_x = sw - w - 8
-            if (in_zone and not self._dragging
-                    and y - 20 <= py <= y + h + 20):
+            peek = now < self._peek_until  # 会话结束提醒：临时滑出期间视同触及
+            if (peek or (in_zone and not self._dragging
+                         and y - 20 <= py <= y + h + 20)):
                 self._hidden = False
                 self._sliding_out = True
                 self._slide_to(reveal_x, on_done=self._finish_reveal)
         elif not self._dragging:
-            if over_card or over_panel:
+            if over_card or over_panel or self._keep_open or self._panel_pinned:
                 self._leave_since = None
+            elif now < self._peek_until:
+                self._leave_since = None  # 提醒滑出期间不立刻缩回
             else:
                 # 靠近本屏任一竖边即自动隐藏：原地缩成细边（region 裁窄 +
                 # 关 Acrylic），窗口不再越出本屏可见内容，邻屏上无残影
@@ -1518,15 +1879,21 @@ class GLMWidget:
 
             if hover_target:
                 self._panel_leave_since = None
-                if hover_target != self._hover_target:
-                    self._hover_target = hover_target
-                    self._hover_since = now
-                elif self._panel_visible:
-                    if (hover_target != self._panel_target
-                            and now - self._hover_since >= PANEL_SWITCH_DELAY):
+                if self._panel_pinned and hover_target == self._panel_target:
+                    pass  # 钉住的正是这个槽位：保持钉住态
+                else:
+                    if self._panel_pinned:
+                        # 钉住不妨碍看其他槽位：hover 新槽位时钉住让位、详情卡切换
+                        self._panel_pinned = False
+                    if hover_target != self._hover_target:
+                        self._hover_target = hover_target
+                        self._hover_since = now
+                    elif self._panel_visible:
+                        if (hover_target != self._panel_target
+                                and now - self._hover_since >= PANEL_SWITCH_DELAY):
+                            self._show_panel(hover_target)
+                    elif now - self._hover_since >= PANEL_DELAY:
                         self._show_panel(hover_target)
-                elif now - self._hover_since >= PANEL_DELAY:
-                    self._show_panel(hover_target)
             elif over_panel:
                 self._hover_target = None
                 self._hover_since = None
@@ -1534,11 +1901,26 @@ class GLMWidget:
             else:
                 self._hover_target = None
                 self._hover_since = None
-                if self._panel_visible:
+                if self._panel_visible and not self._panel_pinned:
                     if self._panel_leave_since is None:
                         self._panel_leave_since = now
                     elif now - self._panel_leave_since >= PANEL_CLOSE_DELAY:
                         self._hide_panel()
+
+        # 自绘菜单的点击外关闭：焦点未抢到（Win 前台焦点限制）时 FocusOut
+        # 不一定触发，这里按物理按键 + 指针位置兜底。武装逻辑：菜单弹出时
+        # 右键往往还按着（Button-3 在按下时触发），必须先检测到一次全松开，
+        # 之后的「按下」才算一次新的点击，否则菜单刚开就被自己关掉（闪退感）
+        if self._menu_win and self._menu_win.winfo_ismapped():
+            pressed = (ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000
+                       or ctypes.windll.user32.GetAsyncKeyState(0x02) & 0x8000)
+            if not pressed:
+                self._menu_armed = True
+            elif self._menu_armed:
+                mx0, my0 = self._menu_win.winfo_rootx(), self._menu_win.winfo_rooty()
+                mw, mh = self._menu_win.winfo_width(), self._menu_win.winfo_height()
+                if not (mx0 <= px <= mx0 + mw and my0 <= py <= my0 + mh):
+                    self._dismiss_menu()
 
     def _slide_to(self, target_x, steps=10, on_done=None):
         """水平滑动到目标 x（ease-out cubic），贴边滑入/滑出与面板共用；
@@ -1606,6 +1988,8 @@ class GLMWidget:
         ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
         self._panel = p
         self._panel_hwnd = hwnd
+        # 点击详情卡：钉住（Keep open）/ 解除钉住，钉住后不随鼠标离开收起
+        p.bind("<Button-1>", lambda _e: self._toggle_panel_pin())
         # 与主卡片相同的顺序约束：先建立 UpdateLayeredWindow 渲染通道，
         # 再叠加 Acrylic / 圆角，否则渲染通道不生效
         blank = Image.new("RGBA", (PANEL_W, PANEL_H), (0, 0, 0, 0))
@@ -1638,99 +2022,135 @@ class GLMWidget:
         return target_x, target_y
 
     def _show_panel(self, target):
-        """展开或切换对应项的局部详情卡片。"""
+        """展开或切换对应项的局部详情卡片：macOS popover 式从被悬停槽位的
+        圆环位置直接弹出（0.82→1.0 缩放 + 淡入，锚定槽位中心），不再从
+        屏幕右侧滑入。"""
         self._ensure_panel()
         was_visible = self._panel_visible
         self._panel_target = target
         self._panel_visible = True
-        self._render_panel()
+        full = self._panel_image()
         target_x, target_y = self._panel_position(target)
         p = self._panel
-        if was_visible:
-            p.geometry(f"+{target_x}+{target_y}")
-            return
 
-        # 起点藏在卡片背后（右停靠偏左、左停靠镜像偏右），滑出时像是
-        # 从卡片背后长出来
-        card_x = self.root.winfo_x()
-        start_x = (card_x + self._win_w + 18 - PANEL_W
-                   if self._side == "left" else card_x - 18)
-        p.geometry(f"+{start_x}+{target_y}")
-        p.deiconify()
-        # 面板压到主卡片之下，滑出时不遮挡卡片
-        ctypes.windll.user32.SetWindowPos(
-            ctypes.c_void_p(self._panel_hwnd), ctypes.c_void_p(self._hwnd),
-            0, 0, 0, 0, 0x1 | 0x2)  # SWP_NOSIZE | SWP_NOMOVE
-        def step(i, steps=8):
+        # 锚点：面板贴轨一侧的边缘 + 槽位中心高度，缩放从该点长出
+        #（与停靠侧无关：面板落在轨道哪侧就锚哪侧，左/右停靠均自然）
+        anchor_right = target_x < self.root.winfo_x()  # 面板在轨道左侧锚右缘
+        anchor_x = target_x + PANEL_W if anchor_right else target_x
+        anchor_y = target_y + PANEL_H / 2
+
+        if not was_visible:
+            p.geometry(f"+{target_x}+{target_y}")
+            p.deiconify()
+            # 面板压到主卡片之下，滑出时不遮挡卡片
+            ctypes.windll.user32.SetWindowPos(
+                ctypes.c_void_p(self._panel_hwnd), ctypes.c_void_p(self._hwnd),
+                0, 0, 0, 0, 0x1 | 0x2)  # SWP_NOSIZE | SWP_NOMOVE
+
+        self._panel_animating = True
+
+        def step(i, steps=7):
+            if not self._panel_visible or self._panel_target != target:
+                self._panel_animating = False
+                return
             t = (i + 1) / steps
             e = 1 - (1 - t) ** 3
-            p.geometry(f"+{round(start_x + (target_x - start_x) * e)}+{target_y}")
+            k = 0.82 + 0.18 * e
+            w, h = max(1, round(PANEL_W * k)), max(1, round(PANEL_H * k))
+            frame = full.resize((w, h), Image.LANCZOS)
+            if e < 0.999:
+                r, g, b, a = frame.split()
+                a = a.point(lambda v: int(v * e))
+                frame = Image.merge("RGBA", (r, g, b, a))
+            x = round(anchor_x - w) if anchor_right else round(anchor_x)
+            y = round(anchor_y - h / 2)
+            p.geometry(f"+{x}+{y}")
+            _update_layered_window(self._panel_hwnd, frame)
             if i + 1 < steps:
                 self.root.after(16, lambda: step(i + 1))
+            else:
+                self._panel_animating = False
+                p.geometry(f"+{target_x}+{target_y}")
+                self._render_panel()
 
         step(0)
+
+    def _toggle_panel_pin(self):
+        """点击详情卡切换钉住态：钉住后不随鼠标离开收起，再点解除并立即收起。"""
+        if not self._panel_visible:
+            return
+        self._panel_pinned = not self._panel_pinned
+        if self._panel_pinned:
+            self._render_panel()  # 画出钉住标记
+        else:
+            self._hide_panel()
 
     def _hide_panel(self):
         self._panel_visible = False
         self._panel_target = None
+        self._panel_pinned = False
         self._hover_since = None
         self._panel_leave_since = None
         if self._panel:
             self._panel.withdraw()
 
-    def _render_panel(self):
-        """重绘详情面板内容（精确数值用目标值而非动画中间值）"""
-        if not self._panel_visible or not self._panel or not self._panel_target:
-            return
+    def _panel_image(self):
+        """构建当前详情目标的完整尺寸卡片图像（精确数值用目标值而非动画中间值）。"""
         p = self._pomo
         if p["stage"] == "off":
             detail = f"下次开工 {p['next_time']}"
         else:
             m, s = divmod(max(0, p["remaining"]), 60)
             detail = f"{m:02d}:{s:02d}"
+        target = self._panel_target
+        codex_slug = target.split(":", 1)[1] if target.startswith("codex") and ":" in target else ""
+        codex = self._codex.get(codex_slug, {}) if target.startswith("codex") else {}
         info = {
             "glm_remaining": self._token_remaining,
-            "glm_reset_left": (self._quota_reset_ts - time.time()
-                               if self._quota_reset_ts else None),
+            "glm_reset_ts": self._quota_reset_ts,
             "glm_weekly": self._weekly_remaining,
             "kimi_remaining": self._kimi_remaining,
-            "kimi_reset_left": (self._kimi_reset_ts - time.time()
-                                if self._kimi_reset_ts else None),
+            "kimi_reset_ts": self._kimi_reset_ts,
             "kimi_monthly": self._kimi_monthly_remaining,
-            "codex_remaining": self._codex_remaining,
-            "codex_weekly_used": self._codex_weekly[0],
-            "codex_weekly_limit": self._codex_weekly[1],
-            "codex_reset_left": (self._codex_reset_ts - time.time()
-                                 if self._codex_reset_ts else None),
-            "codex_today_cost": self._codex_today_cost,
+            "codex_remaining": codex.get("remaining"),
+            "codex_weekly_used": (codex.get("weekly") or (0.0, 0.0))[0],
+            "codex_weekly_limit": (codex.get("weekly") or (0.0, 0.0))[1],
+            "codex_reset_ts": codex.get("reset_ts", 0),
+            "codex_today_cost": codex.get("today_cost"),
             "pomo_label": p["label"],
             "pomo_detail": detail,
             "pomo_progress": p["progress"],
             "pomo_stage": p["stage"],
             "last_refresh": self._last_refresh,
+            "reset_clock": self._reset_clock,
+            "pinned": self._panel_pinned,
         }
-        _update_layered_window(self._panel_hwnd,
-                               create_detail_image(info, self._panel_target,
-                                                   glass=self._panel_glass))
+        return create_detail_image(info, target, glass=self._panel_glass)
+
+    def _render_panel(self):
+        """重绘详情面板内容；弹出/切换动画进行中不干扰（动画结束帧自会落地）。"""
+        if not self._panel_visible or not self._panel or not self._panel_target:
+            return
+        if getattr(self, "_panel_animating", False):
+            return
+        _update_layered_window(self._panel_hwnd, self._panel_image())
 
     def _render(self):
         disp = self._disp
-        glm_view = {
-            "remaining": disp.get("glm", self._token_remaining),
+        values = {
+            "glm": disp.get("glm", self._token_remaining),
+            "kimi": (disp.get("kimi", self._kimi_remaining)
+                     if self._kimi_remaining is not None else None),
         }
-        kimi_view = {
-            "remaining": (disp.get("kimi", self._kimi_remaining)
-                          if self._kimi_remaining is not None else None),
-        }
-        codex_view = {
-            "remaining": (disp.get("codex", self._codex_remaining)
-                          if self._codex_remaining is not None else None),
-        }
+        for slug, c in self._codex.items():
+            key = "codex" if not slug else f"codex:{slug}"
+            values[key] = (disp.get(key, c["remaining"])
+                           if c["remaining"] is not None else None)
         if self._hidden or self._sliding_out:
             img = _create_strip_image(self._pomo["progress"], side=self._side)
         else:
-            img = create_widget_image(glm_view, kimi_view, codex_view,
-                                      self._pomo, self._dim, glass=self._glass)
+            img = create_widget_image(values, self._pomo, self._dim,
+                                      activity=self._activity, glass=self._glass)
         # 细边/整卡窗口形态（region + Acrylic）随图像一起切换，幂等
         self._apply_visual_mode(self._hidden or self._sliding_out)
         _update_layered_window(self._hwnd, img)
@@ -1757,21 +2177,23 @@ class GLMWidget:
             parts.append(kp)
             if self._kimi_monthly_remaining is not None:
                 parts.append(f"Kimi 月额度剩余: {self._kimi_monthly_remaining:.0f}%")
-        if self._codex_remaining is None:
-            parts.append("Codex: 无数据（未配置中转 / 密钥失效 / 网络失败）")
-        else:
-            cp = (f"Codex 周预算剩余: {self._codex_remaining:.0f}%"
-                  f"（${self._codex_weekly[0]:.1f}/${self._codex_weekly[1]:.0f}）")
-            if self._codex_reset_ts:
-                left = max(0, self._codex_reset_ts - time.time())
+        for slug, c in self._codex.items():
+            name = "Codex" if not slug else f"Codex·{slug}"
+            if c["remaining"] is None:
+                parts.append(f"{name}: 无数据（未配置中转 / 密钥失效 / 网络失败）")
+                continue
+            cp = (f"{name} 周预算剩余: {c['remaining']:.0f}%"
+                  f"（${c['weekly'][0]:.1f}/${c['weekly'][1]:.0f}）")
+            if c["reset_ts"]:
+                left = max(0, c["reset_ts"] - time.time())
                 days, rem = divmod(int(left), 86400)
                 cp += f"（预计 {days}天{rem // 3600}h 后重置）"
             parts.append(cp)
-            if self._codex_today_cost is not None:
-                daily = ("（无日限额）" if self._codex_unrestricted else "")
-                parts.append(f"Codex 今日已用: ${self._codex_today_cost:.2f}{daily}")
-            if self._codex_monthly_remaining is not None:
-                parts.append(f"Codex 月额度剩余: {self._codex_monthly_remaining:.0f}%")
+            if c["today_cost"] is not None:
+                daily = ("（无日限额）" if c["unrestricted"] else "")
+                parts.append(f"{name} 今日已用: ${c['today_cost']:.2f}{daily}")
+            if c["monthly"] is not None:
+                parts.append(f"{name} 月额度剩余: {c['monthly']:.0f}%")
         parts.append(f"番茄钟 {detail}")
         self.root.tooltip_text = " | ".join(parts)
         if self._panel_visible:
@@ -1852,25 +2274,79 @@ class GLMWidget:
         self.root.after(100, self._blink_step)
 
     # Token 数据刷新 -------------------------------------------------------
-    def _do_refresh(self):
-        """三源各自独立线程拉取、独立落地：任一源一次 10s 超时不再连带
-        推迟其余源的 UI 更新（旧实现顺序 fetch，Codex 慢会拖住 GLM/Kimi）。"""
-        def _spawn(fetch, apply):
-            def run():
-                try:
-                    result = fetch()
-                except Exception:
-                    # 抓取线程里的未捕获异常（如向已失效的管道 print）不能杀死
-                    # 该源的落地回调，否则对应数据源永远停在初始值
-                    traceback.print_exc()
-                    result = None
-                self.root.after(0, lambda: apply(result))
-            threading.Thread(target=run, daemon=True).start()
+    @staticmethod
+    def _codex_key(slug):
+        return "codex" if not slug else f"codex:{slug}"
 
-        _spawn(fetch_usage, self._apply_glm_usage)
-        _spawn(fetch_kimi_usage, self._apply_kimi_usage)
-        _spawn(fetch_codex_usage, self._apply_codex_usage)
+    def _spawn_fetch(self, source, fetch, apply):
+        """单源独立线程拉取、独立落地；429 退避期内的源直接跳过。
+        不负责下一轮调度（由 _do_refresh / _refresh_source 统一经 _schedule）。"""
+        if not _gate_allows(source):
+            return
+
+        def run():
+            try:
+                result = fetch()
+            except Exception:
+                # 抓取线程里的未捕获异常（如向已失效的管道 print）不能杀死
+                # 该源的落地回调，否则对应数据源永远停在初始值
+                traceback.print_exc()
+                result = None
+            self.root.after(0, lambda: apply(result))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _do_refresh(self):
+        """全源刷新：各自独立线程拉取（任一源超时不拖累其余源 UI 更新）。"""
+        self._refresh_source("glm", schedule=False)
+        self._refresh_source("kimi", schedule=False)
+        for slug, home in CODEX_PROFILES:
+            self._refresh_source(self._codex_key(slug), schedule=False)
         self._schedule()
+
+    def _refresh_source(self, key, schedule=True):
+        """点击槽位刷新对应源（借鉴 Codenotch 点环重拉该 provider）。
+        pomo 槽无远程数据源，仅重绘。"""
+        if key == "glm":
+            self._spawn_fetch("glm", fetch_usage, self._apply_glm_usage)
+        elif key == "kimi":
+            self._spawn_fetch("kimi", fetch_kimi_usage, self._apply_kimi_usage)
+        elif key and key.startswith("codex"):
+            slug = key.split(":", 1)[1] if ":" in key else ""
+            home = dict(CODEX_PROFILES).get(slug)
+            if home is None:
+                return
+            self._spawn_fetch(
+                key,
+                lambda: fetch_codex_usage(home, key),
+                lambda result, s=slug: self._apply_codex_usage(result, s))
+        elif key == "pomo":
+            self._render()
+        else:
+            return
+        if schedule:
+            self._schedule()
+
+    def _check_alert(self, key, name, remaining):
+        """额度阈值告警（借鉴 Codenotch）：已用比例跨越 80% / 100% 时通知，
+        每次跨越只提醒一次；用量明显回落（窗口滚动/额度回满）后自动复位，
+        下次跨越再提醒。告警带随 ui_state.json 持久化。"""
+        if remaining is None:
+            return
+        used = 100 - remaining
+        crossed = 100 if used >= 99.5 else (80 if used >= 80 else 0)
+        band = self._alert_bands.get(key, 0)
+        if crossed > band:
+            self._alert_bands[key] = crossed
+            if crossed >= 100:
+                notify_windows(f"{name} 额度已用尽",
+                               "限额已达 100%，等窗口重置后再冲～")
+            else:
+                notify_windows(f"{name} 额度告急",
+                               f"已用超过 80%，剩余 {remaining:.0f}%，注意节奏～")
+            self._save_state(throttle=True)
+        elif used < 72 and band:
+            self._alert_bands[key] = crossed
+            self._save_state(throttle=True)
 
     def _apply_glm_usage(self, result):
         """UI 线程应用 GLM 抓取结果：短期额度平滑过渡，详情值直接更新。"""
@@ -1881,10 +2357,12 @@ class GLMWidget:
                 self._token_remaining = min(max(100 - short_term_pct, 0), 100)
                 self._set_targets(glm=self._token_remaining)
                 self._quota_reset_ts = result.get("short_term_reset_ts", 0)
+                self._check_alert("glm", "GLM 短期", self._token_remaining)
 
             weekly_pct = result.get("weekly_percentage")
             if weekly_pct is not None:
                 self._weekly_remaining = min(max(100 - weekly_pct, 0), 100)
+            self._save_state(throttle=True)
         self._render()
 
     def _apply_kimi_usage(self, kimi):
@@ -1900,25 +2378,220 @@ class GLMWidget:
             if monthly_pct is not None:
                 self._kimi_monthly_remaining = min(
                     max(100 - monthly_pct, 0), 100)
+            self._check_alert("kimi", "Kimi 短期", self._kimi_remaining)
+            self._save_state(throttle=True)
         self._render()
 
-    def _apply_codex_usage(self, codex):
+    def _apply_codex_usage(self, codex, slug=""):
         """UI 线程应用 Codex 抓取结果；失败时保持既有读数，从未有过数据
-        则保持 None（虚线空环，不伪造读数）。"""
+        则保持 None（虚线空环，不伪造读数）。slug 区分多账号。"""
         self._last_refresh = datetime.now().strftime("%H:%M:%S")
         if codex:
-            self._codex_remaining = codex["weekly_remaining"]
-            self._set_targets(codex=self._codex_remaining)
-            self._codex_reset_ts = codex["weekly_reset_ts"]
-            self._codex_weekly = (codex["weekly_used_usd"],
-                                  codex["weekly_limit_usd"])
-            self._codex_today_cost = codex["today_cost_usd"]
-            self._codex_monthly_remaining = codex["monthly_remaining"]
-            self._codex_unrestricted = codex["unrestricted"]
+            c = self._codex.setdefault(slug, {})
+            c["remaining"] = codex["weekly_remaining"]
+            self._set_targets(**{self._codex_key(slug): c["remaining"]})
+            c["reset_ts"] = codex["weekly_reset_ts"]
+            c["weekly"] = (codex["weekly_used_usd"], codex["weekly_limit_usd"])
+            c["today_cost"] = codex["today_cost_usd"]
+            c["monthly"] = codex["monthly_remaining"]
+            c["unrestricted"] = codex["unrestricted"]
+            name = "Codex 周预算" if not slug else f"Codex·{slug} 周预算"
+            self._check_alert(self._codex_key(slug), name, c["remaining"])
+            self._save_state(throttle=True)
         self._render()
 
     def _schedule(self):
-        self.root.after(REFRESH_INTERVAL * 1000, self._do_refresh)
+        """调度下一轮全源刷新：有会话活跃（busy/blocked）按 5 分钟，
+        全部源空闲时降频到 10 分钟（对齐 Codenotch 的空闲降频策略）。
+        全局只保留一条刷新链：点击单源刷新重置周期，不叠加并行链。"""
+        if self._refresh_timer is not None:
+            try:
+                self.root.after_cancel(self._refresh_timer)
+            except Exception:
+                pass
+        active = any(state in ("busy", "blocked")
+                     for state in self._activity.values())
+        interval = REFRESH_INTERVAL if active else IDLE_REFRESH_INTERVAL
+        self._refresh_timer = self.root.after(interval * 1000, self._do_refresh)
+
+    # 会话闲忙状态 -------------------------------------------------------
+    def _activity_loop(self):
+        """后台线程：每 2 秒扫描各源会话文件信号，结果回 UI 线程落地。"""
+        while True:
+            try:
+                states = scan_activity_states()
+                self.root.after(0, lambda s=states: self._apply_activity(s))
+            except Exception as exc:
+                print(f"活动扫描异常: {exc}")
+            time.sleep(ACTIVITY_SCAN_INTERVAL)
+
+    def _apply_activity(self, states):
+        """UI 线程应用闲忙状态；busy→非忙跳变触发会话结束提醒
+        （主轨临时滑出 5 秒 + 系统提示音，对齐 Codenotch 的结束即提醒）。
+        首次扫描只建立基线，不把既有会话当成「刚结束」。"""
+        if not self._activity:
+            self._activity = states
+        else:
+            names = {"glm": "GLM", "kimi": "Kimi"}
+            for key, new in states.items():
+                old = self._activity.get(key)
+                self._activity[key] = new
+                if old == "busy" and new != "busy":
+                    name = names.get(key)
+                    if name is None:
+                        slug = key.split(":", 1)[1] if ":" in key else ""
+                        name = "Codex" if not slug else f"Codex·{slug}"
+                    self._on_session_end(name, waiting=(new == "blocked"))
+        self._ensure_activity_anim()
+        self._render()
+
+    def _on_session_end(self, name, waiting):
+        """会话离开忙态：临时滑出主轨 5 秒 + 提示音 + toast 说明。"""
+        self._peek_until = time.time() + 5
+        try:
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except RuntimeError:
+            pass
+        if waiting:
+            notify_windows(f"{name} 在等你", "会话暂停，可能在等待你的输入～")
+        else:
+            notify_windows(f"{name} 会话结束", "agent 已停止工作，去看看结果吧～")
+
+    def _ensure_activity_anim(self):
+        """闲忙叠加动画：有源忙时 200ms 一帧（旋转弧），仅阻塞时 500ms
+        一帧（琥珀脉冲），全部空闲即停，角度/相位均取墙钟，帧率无关。"""
+        if self._activity_anim:
+            return
+        if not any(state in ("busy", "blocked") for state in self._activity.values()):
+            return
+        self._activity_anim = True
+        self._activity_anim_tick()
+
+    def _activity_anim_tick(self):
+        states = set(self._activity.values())
+        if not states & {"busy", "blocked"}:
+            self._activity_anim = False
+            return
+        self._render()
+        delay = 200 if "busy" in states else 500
+        self.root.after(delay, self._activity_anim_tick)
+
+    # 显示开关 ---------------------------------------------------------
+    def _ensure_menu_win(self):
+        """惰性创建自绘菜单窗口（分层窗口，PIL 逐像素 alpha + 投影）。"""
+        if self._menu_win:
+            return
+        m = tk.Toplevel(self.root)
+        m.overrideredirect(True)
+        m.attributes("-topmost", True)
+        m.geometry("10x10+0+0")
+        m.update_idletasks()
+        hwnd = self._toplevel_hwnd(int(m.winfo_id()))
+        ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
+        _clear_window_region(hwnd)
+        _set_dwm_round(hwnd, 1)
+        self._menu_win = m
+        self._menu_hwnd = hwnd
+        # 与主卡片/详情卡相同的顺序约束：先建立 UpdateLayeredWindow 渲染通道
+        blank = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+        _update_layered_window(hwnd, blank)
+        m.bind("<Motion>", self._menu_motion)
+        m.bind("<Button-1>", self._menu_click)
+        m.bind("<Escape>", lambda _e: self._dismiss_menu())
+        m.bind("<FocusOut>", lambda _e: self._dismiss_menu())
+        m.withdraw()
+
+    def _menu_index_at(self, y):
+        """窗口局部 y → 菜单项索引；命中分隔线或空白返回 -1。"""
+        if not self._menu_geo:
+            return -1
+        ty = MENU_SHADOW + MENU_PAD_Y
+        for i, text in enumerate(self._menu_items):
+            h = MENU_SEP_H if text is None else MENU_ITEM_H
+            if ty <= y < ty + h:
+                return i if text is not None else -1
+            ty += h
+        return -1
+
+    def _menu_motion(self, event):
+        idx = self._menu_index_at(event.y)
+        if idx != self._menu_hover:
+            self._menu_hover = idx
+            img, _ = create_menu_image(self._menu_items, hover=idx)
+            _update_layered_window(self._menu_hwnd, img)
+
+    def _menu_click(self, event):
+        idx = self._menu_index_at(event.y)
+        if idx < 0:
+            return
+        cmd = self._menu_cmds[idx]
+        self._dismiss_menu()
+        if cmd:
+            cmd()
+
+    def _dismiss_menu(self):
+        if self._menu_win:
+            self._menu_hover = -1
+            self._menu_armed = False
+            self._menu_win.withdraw()
+
+    def _popup_menu(self, event):
+        """右键菜单：开关项文案随状态生成；弹出在插件与详情卡左侧
+        （水平错开不遮挡二者），垂直方向随点击点、夹取在屏幕可见区内。"""
+        self._ensure_menu_win()
+        self._menu_items = [
+            "立即刷新",
+            "恢复隐藏" if self._keep_open else "保持展开",
+            "重置时间显示倒计时" if self._reset_clock else "重置时间显示时刻",
+            "开机自启（点击切换）",
+            None,
+            "退出",
+        ]
+        self._menu_cmds = [
+            self._do_refresh,
+            self._toggle_keep_open,
+            self._toggle_reset_clock,
+            self._toggle_autostart,
+            None,
+            self._quit,
+        ]
+        self._menu_hover = -1
+        self._menu_armed = False  # 重新武装：本次右键松开前不关菜单
+        img, geo = create_menu_image(self._menu_items)
+        self._menu_geo = geo
+        card_w, card_h, shadow = geo
+        win_w, win_h = img.size
+        rect = (self._monitor_rect()
+                or (0, 0, self.root.winfo_screenwidth(),
+                    self.root.winfo_screenheight()))
+        # 卡片右缘贴到插件（或详情卡）左缘 - PANEL_GAP；窗口左缘再让出阴影
+        x = self.root.winfo_x() - card_w - PANEL_GAP
+        if self._panel_visible and self._panel:
+            x = min(x, self._panel.winfo_x() - card_w - PANEL_GAP)
+        x = max(rect[0] + 4 + shadow, x) - shadow
+        y = event.y_root - shadow - MENU_PAD_Y - 2
+        y = max(rect[1] + 4, min(y, rect[3] - win_h - 8))
+        m = self._menu_win
+        m.geometry(f"{win_w}x{win_h}+{x}+{y}")
+        m.deiconify()
+        _update_layered_window(self._menu_hwnd, img)
+        m.focus_set()
+
+    def _toggle_keep_open(self):
+        """保持展开（Codenotch 的 Keep open）：开启后不再贴边自动隐藏。"""
+        self._keep_open = not self._keep_open
+        self._save_state()
+        notify_windows("保持展开已开启" if self._keep_open else "保持展开已关闭",
+                       "状态轨不再自动隐藏" if self._keep_open
+                       else "空闲时将重新自动贴边隐藏")
+
+    def _toggle_reset_clock(self):
+        """重置时间显示模式：倒计时（3h05m 后重置）⇄ 时刻（14:30 重置）。"""
+        self._reset_clock = not self._reset_clock
+        self._save_state()
+        if self._panel_visible:
+            self._render_panel()
 
     # 开机自启 -------------------------------------------------------
     def _toggle_autostart(self):
@@ -1933,7 +2606,9 @@ class GLMWidget:
 
     # 退出 -----------------------------------------------------------
     def _quit(self):
-        self._save_pos()
+        self._save_state()
+        if self._menu_win:
+            self._menu_win.destroy()
         if self._panel:
             self._panel.destroy()
         self.root.quit()
@@ -1945,6 +2620,7 @@ class GLMWidget:
         self.root.after(500, self._do_refresh)    # Token 刷新
         self.root.after(1000, self._pomo_tick)    # 番茄钟启动
         self.root.after(150, self._poll_hover)    # 贴边隐藏 / 详情面板轮询
+        threading.Thread(target=self._activity_loop, daemon=True).start()  # 会话闲忙扫描
         self.root.mainloop()
 
 

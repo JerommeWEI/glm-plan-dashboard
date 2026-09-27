@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 config.json
+config.json.bak*
 dashboard.log
 .mimosa/
 ui_state.json
