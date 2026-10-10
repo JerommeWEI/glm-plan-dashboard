@@ -1043,31 +1043,71 @@ def _draw_tracked(d, cx, y_top, text, font, tracking, fill):
         x += font.getlength(ch) + tracking
 
 
-def _draw_ring(d, cx, cy, radius, stroke, frac, color, no_data=False):
-    """绘制带圆头的状态环；no_data 使用虚线轨道，避免与耗尽态混淆。"""
-    bbox = [cx - radius, cy - radius, cx + radius, cy + radius]
+def _lift(color, k):
+    """向白色提亮 k∈[0,1]，用于弧头发光核心。"""
+    r, g, b = color[:3]
+    return (round(r + (255 - r) * k),
+            round(g + (255 - g) * k),
+            round(b + (255 - b) * k), 255)
+
+
+def _draw_ring(d, img, cx, cy, radius, stroke, frac, color, no_data=False):
+    """软光晕状态环（macOS 呼吸灯质感）：亮环芯 + 双层高斯柔光。
+
+    进度弧不再画前后两个圆头端点——尾部以 smoothstep alpha 渐隐、
+    融入暗色轨道，头部只剩一颗向白提亮的发光核心（彗星画法），接近
+    满环时整圈无缝闭合成完整圆环。no_data 仍用虚线轨道，避免与耗尽
+    态混淆。光晕与清晰环同源：环层两级高斯模糊后垫底、清晰层叠上，
+    任意壁纸下都有柔和的发光轮廓而不改变额度语义。"""
+    s = SS
+    margin = 6 * s                         # 光晕层外边距（≥2.5×最大模糊半径）
+    half = radius + margin
+    size = int(half * 2)
+    layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    dl = ImageDraw.Draw(layer)
+    lc = half                              # 层内中心坐标
+    ring_bbox = [lc - radius, lc - radius, lc + radius, lc + radius]
+
     if no_data:
         for start in range(-90, 270, 52):
-            d.arc(bbox, start, start + 28, fill=OFF_COLOR, width=stroke)
-        return
+            dl.arc(ring_bbox, start, start + 28, fill=OFF_COLOR, width=stroke)
+    else:
+        dl.ellipse(ring_bbox, outline=BAR_TRACK, width=stroke)
+        frac = max(0.0, min(1.0, frac))
+        if 0.001 < frac < 0.999:
+            start = -90.0
+            sweep = 360.0 * frac
+            fade = min(85.0, sweep * 0.6)     # 尾部渐隐弧长（°）
+            n = max(4, int(fade / 3))         # 渐隐段数：每段约 3°，平滑无缝
+            for i in range(n):
+                a0 = start + fade * i / n
+                a1 = start + fade * (i + 1) / n
+                t = (i + 0.5) / n
+                alpha = int(255 * t * t * (3 - 2 * t))   # smoothstep 渐入
+                dl.arc(ring_bbox, a0, a1 + 0.6,
+                       fill=color[:3] + (alpha,), width=stroke)
+            # 实心主体 + 头部发光核心：唯一的“亮端”，光晕下读作光点而非端点
+            dl.arc(ring_bbox, start + fade - 0.6, start + sweep,
+                   fill=color, width=stroke)
+            ang = math.radians(start + sweep)
+            hx, hy = lc + radius * math.cos(ang), lc + radius * math.sin(ang)
+            cap_r = stroke / 2
+            dl.ellipse([hx - cap_r, hy - cap_r, hx + cap_r, hy + cap_r],
+                       fill=color)
+            core_r = stroke * 0.34
+            dl.ellipse([hx - core_r, hy - core_r, hx + core_r, hy + core_r],
+                       fill=_lift(color, 0.55))
+        elif frac >= 0.999:
+            dl.ellipse(ring_bbox, outline=color, width=stroke)
 
-    d.ellipse(bbox, outline=BAR_TRACK, width=stroke)
-    frac = max(0.0, min(1.0, frac))
-    if frac <= 0.001:
-        return
-    if frac >= 0.999:
-        d.ellipse(bbox, outline=color, width=stroke)
-        return
-
-    start = -90
-    end = start + 360 * frac
-    d.arc(bbox, start, end, fill=color, width=stroke)
-    cap_r = stroke / 2
-    for angle in (start, end):
-        radians = math.radians(angle)
-        x = cx + radius * math.cos(radians)
-        y = cy + radius * math.sin(radians)
-        d.ellipse([x - cap_r, y - cap_r, x + cap_r, y + cap_r], fill=color)
+    left, top = int(cx - half), int(cy - half)
+    halo = layer.filter(ImageFilter.GaussianBlur(2.4 * s))       # 宽柔光
+    halo.putalpha(halo.getchannel("A")
+                  .point(lambda v: min(255, round(v * 1.7))))
+    img.alpha_composite(halo, (left, top))
+    img.alpha_composite(layer.filter(ImageFilter.GaussianBlur(1.0 * s)),
+                        (left, top))                             # 近距辉光
+    img.alpha_composite(layer, (left, top))                      # 清晰环芯
 
 
 def _draw_glm_mark(d, cx, cy, size):
@@ -1145,23 +1185,36 @@ def _draw_quota_badge(d, cx, cy, radius, remaining):
     d.ellipse([x - badge_r, y - badge_r, x + badge_r, y + badge_r], fill=color)
 
 
-def _draw_activity_overlay(d, cx, cy, radius, state, now):
-    """会话闲忙可视化（借鉴 Codenotch）：
-    - busy：环内细弧旋转（角度随墙钟推进，帧率无关）
-    - blocked：环外琥珀色脉冲环（alpha 正弦调制，等你输入）
-    idle 不画。叠加在额度环之上，不改变额度语义。"""
+def _draw_activity_overlay(img, cx, cy, radius, state, now):
+    """会话闲忙可视化 v1.33：busy 由「环内细弧旋转」改为**呼吸灯**——
+    整环冷白柔光以 2.4s 周期正弦起伏，环芯亮度与光晕强度同步呼吸，
+    待机指示灯观感；blocked 保持环外琥珀脉冲（1.6s），同样走柔光
+    管线。相位取墙钟，帧率无关。叠加在额度环之上，不改变额度语义。"""
     s = SS
     if state == "busy":
-        r = radius - 5.5 * s
-        start = (now * 140) % 360 - 90
-        d.arc([cx - r, cy - r, cx + r, cy + r],
-              start, start + 100, fill=(255, 255, 255, 220),
-              width=max(1, round(1.5 * s)))
+        color, r, stroke, period = (222, 238, 255), radius, 2.2 * s, 2.4
     elif state == "blocked":
-        r = radius + 3.5 * s
-        alpha = int(110 + 110 * (0.5 + 0.5 * math.sin(2 * math.pi * now / 1.6)))
-        d.ellipse([cx - r, cy - r, cx + r, cy + r],
-                  outline=ORANGE[:3] + (alpha,), width=max(1, round(1.5 * s)))
+        color, r, stroke, period = ORANGE[:3], radius + 3.0 * s, 1.6 * s, 1.6
+    else:
+        return
+    amp = 0.5 + 0.5 * math.sin(2 * math.pi * now / period)
+    core_alpha = int(40 + (100 if state == "busy" else 110) * amp)
+    boost = 0.7 + (2.6 if state == "busy" else 2.4) * amp
+
+    margin = 6 * s
+    half = r + margin
+    size = int(half * 2)
+    layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    dl = ImageDraw.Draw(layer)
+    lc = half
+    dl.ellipse([lc - r, lc - r, lc + r, lc + r],
+               outline=color + (core_alpha,), width=max(1, round(stroke)))
+    left, top = int(cx - half), int(cy - half)
+    glow = layer.filter(ImageFilter.GaussianBlur(2.0 * s))
+    glow.putalpha(glow.getchannel("A")
+                  .point(lambda v: min(255, round(v * boost))))
+    img.alpha_composite(glow, (left, top))
+    img.alpha_composite(layer, (left, top))
 
 
 def create_widget_image(values, pomo, dim, activity=None, glass=False):
@@ -1202,7 +1255,8 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False):
             stage_color = _stage_color(pomo["stage"])
             if dim:
                 stage_color = stage_color[:3] + (int(255 - 145 * dim),)
-            _draw_ring(d, cx, cy, radius, stroke, pomo["progress"], stage_color)
+            _draw_ring(d, img, cx, cy, radius, stroke,
+                       pomo["progress"], stage_color)
             _draw_icon_disc(d, cx, cy, glyph_size * 0.75, stage_color)
             _draw_pomodoro_mark(d, cx, cy, glyph_size, (248, 248, 250, 255))
             draw_percentage(SLOT_PERCENT_TOPS[i], pomo["progress"] * 100)
@@ -1215,7 +1269,7 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False):
             ring_color, disc_color = KIMI_GREEN, KIMI_GREEN
         else:  # codex 及各 slug 账号
             ring_color, disc_color = CODEX_MAGENTA, CODEX_DISC
-        _draw_ring(d, cx, cy, radius, stroke,
+        _draw_ring(d, img, cx, cy, radius, stroke,
                    0 if remaining is None else remaining / 100,
                    ring_color, no_data=remaining is None)
         if remaining is None:
@@ -1233,7 +1287,7 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False):
             else:
                 _draw_codex_mark(d, cx, cy, glyph_size)
         _draw_quota_badge(d, cx, cy, radius, remaining)
-        _draw_activity_overlay(d, cx, cy, radius, activity.get(key), now)
+        _draw_activity_overlay(img, cx, cy, radius, activity.get(key), now)
         draw_percentage(SLOT_PERCENT_TOPS[i], remaining)
 
     return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
@@ -1890,9 +1944,11 @@ class GLMWidget:
                         self._hover_since = now
                     elif self._panel_visible:
                         if (hover_target != self._panel_target
+                                and self._hover_since is not None
                                 and now - self._hover_since >= PANEL_SWITCH_DELAY):
                             self._show_panel(hover_target)
-                    elif now - self._hover_since >= PANEL_DELAY:
+                    elif (self._hover_since is not None
+                            and now - self._hover_since >= PANEL_DELAY):
                         self._show_panel(hover_target)
             elif over_panel:
                 self._hover_target = None
@@ -2089,6 +2145,11 @@ class GLMWidget:
         self._panel_visible = False
         self._panel_target = None
         self._panel_pinned = False
+        # _hover_since 与 _hover_target 必须同生同灭：只清前者的话，
+        # 「面板弹出→按下拖拽(_drag_start 收面板)→松手指针仍停在原槽位」
+        # 会让 hover_target == _hover_target 而 _hover_since 为 None，
+        # _poll_hover_once 里 now - None 每 150ms 炸一次 TypeError
+        self._hover_target = None
         self._hover_since = None
         self._panel_leave_since = None
         if self._panel:
@@ -2458,8 +2519,8 @@ class GLMWidget:
             notify_windows(f"{name} 会话结束", "agent 已停止工作，去看看结果吧～")
 
     def _ensure_activity_anim(self):
-        """闲忙叠加动画：有源忙时 200ms 一帧（旋转弧），仅阻塞时 500ms
-        一帧（琥珀脉冲），全部空闲即停，角度/相位均取墙钟，帧率无关。"""
+        """闲忙叠加动画：有源忙/阻塞时 100–120ms 一帧驱动呼吸灯柔光，
+        全部空闲即停；相位取墙钟，帧率无关。"""
         if self._activity_anim:
             return
         if not any(state in ("busy", "blocked") for state in self._activity.values()):
@@ -2473,7 +2534,7 @@ class GLMWidget:
             self._activity_anim = False
             return
         self._render()
-        delay = 200 if "busy" in states else 500
+        delay = 100 if "busy" in states else 120
         self.root.after(delay, self._activity_anim_tick)
 
     # 显示开关 ---------------------------------------------------------
@@ -2606,6 +2667,7 @@ class GLMWidget:
 
     # 退出 -----------------------------------------------------------
     def _quit(self):
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] exit: 用户菜单退出")  # 区分正常退出与被外部杀死
         self._save_state()
         if self._menu_win:
             self._menu_win.destroy()
@@ -2616,6 +2678,7 @@ class GLMWidget:
 
     # 启动 -----------------------------------------------------------
     def run(self):
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] start: pid={os.getpid()}")  # 会话分界，便于事后定位闪退点
         register_aumid()                          # 注册通知应用 ID
         self.root.after(500, self._do_refresh)    # Token 刷新
         self.root.after(1000, self._pomo_tick)    # 番茄钟启动
@@ -2639,4 +2702,17 @@ def _ensure_single_instance():
 
 if __name__ == "__main__":
     _single_mutex = _ensure_single_instance()  # 持有引用，进程退出前互斥锁不释放
+
+    # --- presence_lock: 摄像头人脸识别离座锁屏(作为守护线程嵌入, 不再单独挂进程) ---
+    try:
+        _presence_dir = r"E:\GIT_Space\safety-precautions"
+        if _presence_dir not in sys.path:
+            sys.path.insert(0, _presence_dir)
+        import presence_lock as _presence
+        threading.Thread(target=_presence.run_service, kwargs={"camera": None},
+                         name="presence-lock", daemon=True).start()
+    except Exception:
+        traceback.print_exc()  # 锁屏服务失败不影响 dashboard 本体
+    # ---------------------------------------------------------------------------
+
     GLMWidget().run()
