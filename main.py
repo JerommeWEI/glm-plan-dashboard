@@ -371,6 +371,12 @@ def fetch_usage():
             body = json.loads(resp.read().decode("utf-8"))
             _gate_reset("glm")
             data = body.get("data") or body
+            if not data.get("limits"):
+                # HTTP 200 但业务层失败（如 key 过期返回
+                # {"code":1000,"msg":"Authentication Failed","success":false}）：
+                # 不抛异常、走静默 None，但必须留痕，否则排查时日志一片空白
+                print(f"GLM 用量接口无额度数据: {body.get('msg') or str(body)[:150]}")
+                return None
             token_limits = [
                 item for item in data.get("limits", [])
                 if item.get("type") == "TOKENS_LIMIT"
