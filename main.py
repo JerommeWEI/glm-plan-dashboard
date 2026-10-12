@@ -67,6 +67,7 @@ REFRESH_INTERVAL = 300      # 有会话活跃时的刷新间隔：5 分钟
 IDLE_REFRESH_INTERVAL = 600  # 全部源空闲（无会话活动）时降频到 10 分钟
 BACKOFF_BASE = 60           # 429 退避起步秒数，连续触发翻倍
 BACKOFF_CAP = 900           # 退避上限 15 分钟
+DEAD_AFTER = 3              # 连续多少次抓取无响应 → 摘掉该源图标（成功一次即恢复）
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"  # 项目本地独立配置（脱离 cc 的兜底）
 # ZCode 的 API 配置（最高优先级，自动跟随其更新）：
@@ -972,12 +973,21 @@ SLOT_LAYOUT = (["glm", "kimi"]
                + ["codex" if not slug else f"codex:{slug}"
                   for slug, _ in CODEX_PROFILES]
                + ["pomo"])
-SLOT_SPECS = tuple((key, 28 + 60 * i) for i, key in enumerate(SLOT_LAYOUT))
-WIDGET_H = 60 * len(SLOT_LAYOUT) + 12
+
+
+def _slot_specs(keys):
+    """槽位 key 列表 → ((key, 中心 y), ...)：槽距 60、首槽中心 28，
+    布局推导的单一来源——可见槽位变化（源被摘掉/恢复）时用它重排。"""
+    return tuple((key, 28 + 60 * i) for i, key in enumerate(keys))
+
+
+def _widget_h(count):
+    return 60 * count + 12
+
+
+SLOT_SPECS = _slot_specs(SLOT_LAYOUT)
+WIDGET_H = _widget_h(len(SLOT_LAYOUT))
 SLOT_KEYS = tuple(key for key, _ in SLOT_SPECS)
-SLOT_CENTERS = tuple(center for _, center in SLOT_SPECS)
-SLOT_BREAKS = tuple((a[1] + b[1]) // 2 for a, b in zip(SLOT_SPECS, SLOT_SPECS[1:]))
-SLOT_PERCENT_TOPS = tuple(center + 19 for _, center in SLOT_SPECS)
 SS = 4                          # 超采样倍率：先画 4 倍大图再 LANCZOS 缩小抗锯齿
 CARD_BG = (28, 28, 30, 190)     # #1C1C1E @75%，iOS secondarySystemBackground(dark)
 HAIRLINE = (255, 255, 255, 26)  # 发丝描边 / 分隔线
@@ -1217,14 +1227,20 @@ def _draw_activity_overlay(img, cx, cy, radius, state, now):
     img.alpha_composite(layer, (left, top))
 
 
-def create_widget_image(values, pomo, dim, activity=None, glass=False):
+def create_widget_image(values, pomo, dim, activity=None, glass=False,
+                        slots=None):
     """生成窄幅状态轨：GLM、Kimi、Codex（可多账号）与番茄阶段图标圆环。
 
     主轨只呈现各源最关键的一格读数（GLM/Kimi 短期额度、Codex 周预算、当前
     番茄阶段）；重置、周/月额度和精确读数保留在 hover 详情面板中。每个图标
-    下方显示对应剩余比例。activity 给出各额度源的会话闲忙态叠加。"""
+    下方显示对应剩余比例。activity 给出各额度源的会话闲忙态叠加。
+    slots 为当前可见槽位（默认全量）：被判无响应的源由调用方整体摘掉，
+    轨道高度随可见槽数收缩。"""
+    keys = tuple(slots) if slots is not None else SLOT_KEYS
+    specs = _slot_specs(keys)
+    height = _widget_h(len(keys))
     s = SS
-    cw, ch = WIDGET_W * s, WIDGET_H * s
+    cw, ch = WIDGET_W * s, height * s
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
@@ -1249,8 +1265,8 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False):
         d.line([(cx - glyph_size * 0.28, cy), (cx + glyph_size * 0.28, cy)],
                fill=OFF_COLOR, width=max(2, s))
 
-    for i, key in enumerate(SLOT_KEYS):
-        cy = SLOT_CENTERS[i] * s
+    for i, key in enumerate(keys):
+        cy = specs[i][1] * s
         if key == "pomo":
             stage_color = _stage_color(pomo["stage"])
             if dim:
@@ -1259,7 +1275,7 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False):
                        pomo["progress"], stage_color)
             _draw_icon_disc(d, cx, cy, glyph_size * 0.75, stage_color)
             _draw_pomodoro_mark(d, cx, cy, glyph_size, (248, 248, 250, 255))
-            draw_percentage(SLOT_PERCENT_TOPS[i], pomo["progress"] * 100)
+            draw_percentage(specs[i][1] + 19, pomo["progress"] * 100)
             continue
 
         remaining = values.get(key)
@@ -1288,25 +1304,26 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False):
                 _draw_codex_mark(d, cx, cy, glyph_size)
         _draw_quota_badge(d, cx, cy, radius, remaining)
         _draw_activity_overlay(img, cx, cy, radius, activity.get(key), now)
-        draw_percentage(SLOT_PERCENT_TOPS[i], remaining)
+        draw_percentage(specs[i][1] + 19, remaining)
 
-    return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
+    return img.resize((WIDGET_W, height), Image.LANCZOS)
 
 
-def _create_strip_image(progress=0.0, side="right"):
+def _create_strip_image(progress=0.0, side="right", height=WIDGET_H):
     """贴边隐藏时的细边：窗口只露出停靠侧的 EDGE_STRIP 像素（其余伸在
     屏外/邻屏，由 region 裁掉），可见区画一条竖向番茄进度条——水位式：
     满格时水位齐顶，随剩余时间自上而下回落，落到空即时间到。颜色按
     剩余比例分级：>50% 绿 / 20–50% 黄 / <20% 红，一眼看出还能撑多久。
-    side 为停靠侧："right" 时贴屏右缘、细条画在窗口左侧；"left" 镜像。"""
+    side 为停靠侧："right" 时贴屏右缘、细条画在窗口左侧；"left" 镜像。
+    height 跟随当前可见槽数（摘牌后的矮轨细边同步变矮）。"""
     s = SS
-    img = Image.new("RGBA", (WIDGET_W * s, WIDGET_H * s), (0, 0, 0, 0))
+    img = Image.new("RGBA", (WIDGET_W * s, height * s), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     if side == "left":
         x0, x1 = (WIDGET_W - 4.5) * s, (WIDGET_W - 1.5) * s
     else:
         x0, x1 = 1.5 * s, 4.5 * s
-    y0, y1 = 8 * s, (WIDGET_H - 8) * s
+    y0, y1 = 8 * s, (height - 8) * s
     d.rounded_rectangle([x0, y0, x1, y1], radius=1.5 * s,
                         fill=(255, 255, 255, 36))
     if progress > 0.01:
@@ -1314,7 +1331,7 @@ def _create_strip_image(progress=0.0, side="right"):
         fill_h = max((y1 - y0) * progress, x1 - x0)
         d.rounded_rectangle([x0, y1 - fill_h, x1, y1], radius=1.5 * s,
                             fill=color[:3] + (220,))
-    return img.resize((WIDGET_W, WIDGET_H), Image.LANCZOS)
+    return img.resize((WIDGET_W, height), Image.LANCZOS)
 
 
 def create_detail_image(info, target, glass=False):
@@ -1675,6 +1692,10 @@ class GLMWidget:
         self._targets = {}
         self._animating = False
         self._refresh_timer = None  # 全局唯一全源刷新链（_schedule 维护）
+        # 源死活状态：连续 DEAD_AFTER 次抓取无响应的源进 _dead，图标（整个
+        # 槽位）从状态轨摘除；周期刷新对其照常探测，成功一次即复活挂回
+        self._dead = set()
+        self._fail_counts = {}
 
         # 主轨先以 PIL 渲染一帧；局部详情卡片另行启用 Acrylic。
         self._glass = False
@@ -1841,15 +1862,64 @@ class GLMWidget:
         return None, None, "right"
 
     # 贴边隐藏 + hover 详情面板 --------------------------------------
-    @staticmethod
-    def _slot_at(local_y):
-        """返回纵向状态轨中被悬停的独立项（分界由 SLOT_SPECS 推导）。"""
-        if local_y < 0 or local_y >= WIDGET_H:
+    def _visible_keys(self):
+        """当前状态轨实际渲染的槽位：被判无响应的源整体摘除，番茄钟恒在。"""
+        return [k for k in SLOT_KEYS if k == "pomo" or k not in self._dead]
+
+    def _layout(self):
+        """(可见 key 列表, (key, 中心 y) 规格)——hover 命中 / 面板锚点 /
+        图像绘制共用同一份动态布局。"""
+        keys = self._visible_keys()
+        return keys, _slot_specs(keys)
+
+    def _relayout(self):
+        """图标摘/挂后重排：窗口高度随可见槽数变化，竖直中心保持不变
+        （贴边细边态同样适用——region 高度随 _win_h 重建）。"""
+        h = _widget_h(len(self._visible_keys()))
+        if h == self._win_h:
+            self._render()
+            return
+        old_h = self._win_h
+        self._win_h = h
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        y += (old_h - h) // 2
+        rect = self._monitor_rect()
+        if rect:
+            y = max(rect[1], min(y, rect[3] - h))
+        self._visual_mode = None  # 高度变了：strip region / Acrylic 按新高度重建
+        self.root.geometry(f"{self._win_w}x{h}+{x}+{y}")
+        self._render()
+
+    def _note_fetch_result(self, key, ok):
+        """UI 线程登记一次抓取结果：连续 DEAD_AFTER 次无响应摘掉该源图标
+        （槽位整体移出状态轨），一旦重新成功立即复位挂回。周期刷新对摘掉
+        的源照常抓取，API 恢复（重新部署 / 换 key）后图标自动回归。"""
+        if ok:
+            self._fail_counts.pop(key, None)
+            if key in self._dead:
+                self._dead.discard(key)
+                print(f"{key} 恢复响应，图标已重新挂载")
+                self._relayout()
+            return
+        n = self._fail_counts.get(key, 0) + 1
+        self._fail_counts[key] = n
+        if n >= DEAD_AFTER and key not in self._dead:
+            self._dead.add(key)
+            print(f"{key} 连续 {n} 次抓取无响应，暂时摘掉图标（恢复后自动回归）")
+            if self._panel_visible and self._panel_target == key:
+                self._hide_panel()
+            self._relayout()
+
+    def _slot_at(self, local_y):
+        """返回纵向状态轨中被悬停的独立项（分界由当前可见槽位推导）。"""
+        if local_y < 0 or local_y >= self._win_h:
             return None
-        for key, brk in zip(SLOT_KEYS, SLOT_BREAKS):
+        keys, specs = self._layout()
+        breaks = tuple((a[1] + b[1]) // 2 for a, b in zip(specs, specs[1:]))
+        for (key, _), brk in zip(specs, breaks):
             if local_y < brk:
                 return key
-        return SLOT_KEYS[-1]
+        return keys[-1]
 
     def _poll_hover(self):
         """150ms 轮询驱动贴边隐藏与详情面板的状态机（自愈：任何一轮异常
@@ -2072,7 +2142,7 @@ class GLMWidget:
             target_x = card_x - PANEL_W - PANEL_GAP
             if target_x < rect[0] + PANEL_GAP:
                 target_x = card_x + self._win_w + PANEL_GAP
-        target_y = card_y + SLOT_CENTERS[SLOT_KEYS.index(target)] - PANEL_H // 2
+        target_y = card_y + dict(self._layout()[1]).get(target, 28) - PANEL_H // 2
         target_x = max(rect[0] + PANEL_GAP, min(target_x, rect[2] - PANEL_W - PANEL_GAP))
         target_y = max(rect[1] + PANEL_GAP, min(target_y, rect[3] - PANEL_H - PANEL_GAP))
         return target_x, target_y
@@ -2208,10 +2278,12 @@ class GLMWidget:
             values[key] = (disp.get(key, c["remaining"])
                            if c["remaining"] is not None else None)
         if self._hidden or self._sliding_out:
-            img = _create_strip_image(self._pomo["progress"], side=self._side)
+            img = _create_strip_image(self._pomo["progress"], side=self._side,
+                                      height=self._win_h)
         else:
             img = create_widget_image(values, self._pomo, self._dim,
-                                      activity=self._activity, glass=self._glass)
+                                      activity=self._activity, glass=self._glass,
+                                      slots=self._visible_keys())
         # 细边/整卡窗口形态（region + Acrylic）随图像一起切换，幂等
         self._apply_visual_mode(self._hidden or self._sliding_out)
         _update_layered_window(self._hwnd, img)
@@ -2221,13 +2293,19 @@ class GLMWidget:
         else:
             m, s = divmod(max(0, p["remaining"]), 60)
             detail = f"{p['label']} {m:02d}:{s:02d}"
-        parts = [f"GLM 短期剩余: {self._token_remaining:.0f}%"]
-        if self._quota_reset_ts:
-            left = max(0, self._quota_reset_ts - time.time())
-            h, rem = divmod(int(left), 3600)
-            parts[0] += f"（{h}h{rem // 60:02d}m 后重置）"
-        parts.append(f"GLM 周额度剩余: {self._weekly_remaining:.0f}%")
-        if self._kimi_remaining is None:
+        parts = []
+        if "glm" in self._dead:
+            parts.append("GLM: API 无响应，图标已暂时摘除（恢复后自动回归）")
+        else:
+            parts.append(f"GLM 短期剩余: {self._token_remaining:.0f}%")
+            if self._quota_reset_ts:
+                left = max(0, self._quota_reset_ts - time.time())
+                h, rem = divmod(int(left), 3600)
+                parts[0] += f"（{h}h{rem // 60:02d}m 后重置）"
+            parts.append(f"GLM 周额度剩余: {self._weekly_remaining:.0f}%")
+        if "kimi" in self._dead:
+            parts.append("Kimi: 无响应，图标已暂时摘除（恢复后自动回归）")
+        elif self._kimi_remaining is None:
             parts.append("Kimi: 无数据（未检测到 Kimi 本地服务）")
         else:
             kp = f"Kimi 短期剩余: {self._kimi_remaining:.0f}%"
@@ -2240,6 +2318,9 @@ class GLMWidget:
                 parts.append(f"Kimi 月额度剩余: {self._kimi_monthly_remaining:.0f}%")
         for slug, c in self._codex.items():
             name = "Codex" if not slug else f"Codex·{slug}"
+            if self._codex_key(slug) in self._dead:
+                parts.append(f"{name}: 无响应，图标已暂时摘除（恢复后自动回归）")
+                continue
             if c["remaining"] is None:
                 parts.append(f"{name}: 无数据（未配置中转 / 密钥失效 / 网络失败）")
                 continue
@@ -2412,6 +2493,7 @@ class GLMWidget:
     def _apply_glm_usage(self, result):
         """UI 线程应用 GLM 抓取结果：短期额度平滑过渡，详情值直接更新。"""
         self._last_refresh = datetime.now().strftime("%H:%M:%S")
+        self._note_fetch_result("glm", bool(result))
         if result:
             short_term_pct = result.get("short_term_percentage")
             if short_term_pct is not None:
@@ -2430,6 +2512,7 @@ class GLMWidget:
         """UI 线程应用 Kimi 抓取结果；daemon 不在跑时不清空既有读数，
         从未有过数据则保持 None（空轨道）。"""
         self._last_refresh = datetime.now().strftime("%H:%M:%S")
+        self._note_fetch_result("kimi", bool(kimi))
         if kimi:
             self._kimi_remaining = min(
                 max(100 - kimi["short_term_percentage"], 0), 100)
@@ -2447,6 +2530,7 @@ class GLMWidget:
         """UI 线程应用 Codex 抓取结果；失败时保持既有读数，从未有过数据
         则保持 None（虚线空环，不伪造读数）。slug 区分多账号。"""
         self._last_refresh = datetime.now().strftime("%H:%M:%S")
+        self._note_fetch_result(self._codex_key(slug), bool(codex))
         if codex:
             c = self._codex.setdefault(slug, {})
             c["remaining"] = codex["weekly_remaining"]
