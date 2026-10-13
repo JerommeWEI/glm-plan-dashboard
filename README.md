@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.36
+# GLM Plan Dashboard v1.37
 
 GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，GLM 深蓝晶体、Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏五个图标圆环分别显示三源短期/套餐额度、Codex 周预算和当前番茄阶段剩余，图标下方显示百分比。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
 
@@ -21,7 +21,7 @@ GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深
 
 **状态轨（v1.28 · v1.35 扩至五槽）**
 - 44px 宽的完整胶囊内固定五枚圆环：GLM 5h 短期额度（深蓝晶体）、Kimi 5h 短期额度（绿色星芒）、Codex 周预算（洋红终端符）、MiMo 套餐剩余（橙色气泡火花）、当前番茄阶段剩余（工作紫 / 休息 teal / 非工作灰）。每枚图标下方显示对应剩余百分比，图标和位置保持固定，便于形成空间记忆。
-- 平台主色不随额度变化，低于 40% 时用橙色小点提示，低于 15% 时用红色小点提示；精确百分比、重置时间、GLM 周额度、Kimi 月额度、Codex 周绝对值（$已用/$上限）与今日消耗、MiMo 套餐名与月额度全部保留在 hover 详情中。
+- 平台主色不随额度变化，低于 40% 时用橙色小点提示，低于 15% 时用红色小点提示；精确百分比、重置时间、GLM 周额度、Kimi 月额度、Codex 周绝对值（$已用/$上限）与今日消耗、MiMo 本机本月已用 token 数与预算全部保留在 hover 详情中。
 - Kimi 本地 daemon、Codex 中转、MiMo 端点不可用时显示灰色虚线占位环，真实额度耗尽仍是红色警示点；番茄非工作时段使用灰色沙漏环，不把它误报为额度耗尽。
 - 主轨只在状态变化时重绘：番茄钟每秒一帧、额度刷新后的缓动才 30fps，保留原有离屏 Pillow + Win32 分层窗口路径，无额外运行时依赖。
 - 每 5 分钟自动刷新数据，三源（GLM 走配置的 API、Kimi 走本地 daemon、Codex 走中转站 `/v1/usage`）各自独立线程拉取与落地，任一源超时不拖慢其余源的 UI 更新
@@ -31,11 +31,14 @@ GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深
 - 额度为 USD 计价订阅，无 5h 窗口：环语义取**周预算剩余比例**（如 (300-17.4)/300），hover 详情给「周 $17.4/$300 · 6天9h 后预计重置 · 今日 $17.4」；`daily_limit_usd=0` 且 `mode=unrestricted` 表示无日限额，今日已用只以文字呈现、绝不折算成比例
 - 周重置时刻由 `weekly_window_start + 7 天` 推算（服务端无显式 reset 字段），窗口起点在未来或已越过推算点时显示「等待窗口」而非编造倒计时；安全策略沿用 GLM 源（https + 域名白名单 + DNS 后私网阻断 + 禁重定向 + 响应体 64KB 上限）
 
-**MiMo 用量源（v1.35 · v1.36 修正空态语义）**
-- 数据来自 `config.json` 的 `mimo` 段（使用者自行提供端点，每次刷新现读文件、改完最迟一个刷新周期生效）：
+**MiMo 用量源（v1.35 槽位 · v1.36 空态语义 · v1.37 本机账本）**
+- MiMo 是 **token 套餐计量**，不是 GLM / Kimi 那种 5h 窗口百分比，而且**没有开箱即读的官方额度接口**（实测）：Token Plan 网关 `token-plan-cn.xiaomimimo.com/v1`（`tp-` key）只有 `/v1/models` 通，`/usage` `/quota` `/subscription` `/dashboard/billing` 等 50 多个候选路径全 404，对话响应头也不带限流头；账号级官方接口 `mimo-server-cn.xiaomimimo.com/api/user/usage` 存在（返回 `{code:0,data:{percent,resetDate}}`），但只认小米账号会话 cookie——那份库在 MiMo Desktop 运行期间被独占锁死，读不到
+- 因此默认走**本机账本**：`~/.local/share/mimocode/mimocode.db`（路径遵循 `MIMOCODE_HOME` / `XDG_DATA_HOME`）里每条 assistant 消息都记了 `tokens.{input,output,reasoning}` 与 `providerID`、时间戳，只读打开（`mode=ro&immutable=1`）统计**本机本月已消耗**。口径：`input + output + reasoning`，**不含 `cache.read`**（缓存读不按原价计费）；provider 只取 MiMo 自家（`mimo-desktop` 走桌面代理、`xiaomi*` 走 Token Plan / 计费网关），别的供应商不算进来
+- **环的分母（月度 token 预算）只有使用者知道**，写进 `config.json`：
 
   ```json
   "mimo": {
+    "budget": 10000000,
     "url":    "https://…/usage",
     "token":  "…",
     "auth":   "bearer",
@@ -43,11 +46,10 @@ GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深
   }
   ```
 
-  `auth` 三选一：`bearer`（默认，`Authorization: Bearer <token>`）/ `header`（`header` 指定的头直接放原文，如 `X-Api-Key`）/ `cookie`（原文整段作为 `Cookie` 头）。三者都不填 `token` 即为匿名请求
-- 读数解析按字段名在响应里做 ≤4 层浅查找、命中即停：`remaining*` 当作剩余，`percent` / `usedRatio` / `used*` 当作已用（`100 - 已用`）；数值 ≤1 按比例 ×100，>1 按百分数，字符串 `"41%"` 也能吃。重置点取 `reset*` / `nextResetTime` / `expire*`，兼容 epoch 秒、毫秒与 ISO-8601，解析不出显示「等待同步」
-- 环语义是**套餐剩余比例**（对齐全卡「剩余递减」），hover 详情给套餐名或月额度 + 重置倒计时；响应里有 `plan` / `planName` / `title` 时显示套餐名，有 `monthly` / `month_remaining` 时改显示月额度
-- 安全策略沿用 GLM / Codex 源：仅 https、DNS 解析后逐 IP 阻断私网/环回/链路本地/保留/组播地址、禁重定向（`_OPENER`）、响应体 64KB 上限、10s 超时、429 指数退避；因端点由使用者配置，不做硬编码域名白名单（白名单会让改配置立即失效）
-- **未配置 / 端点不可达 / 响应里读不出比例一律返回 None**：界面走灰色虚线空环 + `--`，绝不伪造读数。三者语义不同：**未配置**时槽位一直挂着（图标常在，hover 详情写明「config.json 未配 mimo 段」）；**配了端点却拉不到**才计入无响应，连续 3 轮后整个槽位自动摘牌、配通一次即挂回（与 Kimi daemon 不在跑时同一语义）
+  配了 `budget` 环就画「(预算 − 本月已用) / 预算」；**没配就保持虚线空环**，但 hover 详情与主卡 tooltip 仍如实显示「已用 2.9M」——宁可不画比例，也不拿一个猜的分母算百分比
+- `url` 是**可选**的远端端点，配了就优先于本机账本；`auth` 三选一：`bearer`（默认，`Authorization: Bearer <token>`）/ `header`（`header` 指定的头放原文，如 `X-Api-Key`）/ `cookie`（原文整段作为 `Cookie` 头）。远端响应按字段名做 ≤4 层浅查找：`remaining*` 当剩余、`percent` / `usedRatio` / `used*` 当已用（`100 − 已用`），数值 ≤1 按比例 ×100、>1 按百分数，字符串 `"41%"` 也能吃；重置点取 `reset*` / `nextResetTime` / `expire*`，兼容 epoch 秒、毫秒与 ISO-8601
+- 远端安全策略沿用 GLM / Codex 源：仅 https、DNS 解析后逐 IP 阻断私网/环回/链路本地/保留/组播地址、禁重定向（`_OPENER`）、响应体 64KB 上限、10s 超时、429 指数退避；因端点由使用者配置，不做硬编码域名白名单（白名单会让改配置立即失效）
+- **两种来源都拿不到数**才返回 None（虚线空环 + `--`）。**没配远端端点**时槽位一直挂着（图标常在）；**配了远端端点却拉不到**才计入无响应，连续 3 轮后整个槽位自动摘牌、配通一次即挂回
 
 **番茄工作闹钟（下段）**
 - 锚定作息表：工作日 9:00–11:30、13:30–18:00 两个时段内连续跑「45 分钟工作 ↔ 15 分钟休息」；时段尾自然截断（上午 11:00–11:30、下午 17:30–18:00 为 30 分钟收尾工作段，倒计时递减到 0 正好落在午休/下班边界）
@@ -89,7 +91,7 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 
 > **刷新兜底 key**：兜底 `config.json` 里的 key 过期后，重跑 `python setup_config.py` 即可——它会跳过已有 `config.json`，从 ZCode / 环境变量 / `~/.claude/settings.json` 读取最新配置写入（只覆盖 `base_url` / `token`，`mimo` 等手工段原样保留）。
 
-> **MiMo 用量端点**：在 `config.json` 里加一段 `mimo`（`url` / `token` / `auth` / `header`，见上方「MiMo 用量源」），最迟一个刷新周期生效；不配就一直显示虚线空环，配好后自动挂回。
+> **MiMo 用量**：默认零配置——自动统计本机 mimocode 账本里本月已消耗的 token（hover 可见）。想让橙环画出百分比，在 `config.json` 里加 `"mimo": {"budget": <月度 token 预算>}`（见上方「MiMo 用量源」）；另可选 `url`/`token` 指到远端额度端点。最迟一个刷新周期生效。
 
 **开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
@@ -102,6 +104,11 @@ C:\Windows\explorer.exe "E:\GIT_Space\glm-plan-dashboard\launch-dashboard.vbs"
 在沙盒里直接 `wscript launch-dashboard.vbs`、`pythonw main.py` 或 `schtasks` 均不可行（前两者被 Job 连坐回收，后者被沙盒拦截）。进程在跑但看不到悬浮窗时，先检查它是否缩成了屏缘 6px 细条（鼠标触及该侧屏缘即滑出），位置记忆在 `ui_state.json`。
 
 ## 更新日志
+
+### v1.37
+- **MiMo 改读本机账本（默认零配置）**：官方额度接口走不通——Token Plan 网关 50 多个候选路径全 404，账号级 `/api/user/usage` 只认小米账号会话 cookie（MiMo Desktop 运行时那份库被独占锁死）。改为只读打开 `~/.local/share/mimocode/mimocode.db`，按 assistant 消息的 `tokens.{input,output,reasoning}` 统计**本机本月已消耗**（`input+output+reasoning`，不含 `cache.read`；provider 只取 `mimo-desktop` / `xiaomi*`），hover 与详情卡如实显示「已用 2.9M」这类事实读数
+- **预算可配**：`config.json` 的 `mimo.budget`（月度 token 预算）是套餐总量——唯一没有公开接口可查的数字，只有使用者知道。配了环就画 `(预算 − 已用) / 预算`，没配就保持虚线空环，**绝不拿猜的分母算百分比**；`mimo.url` 降级为可选远端端点，配了优先于本机账本
+- 远端端点解析逻辑与安全策略不变（字段名浅查找兼容 `percent` / `usedRatio` / `remaining`，仅 https + 私网 IP 阻断 + 禁重定向 + 64KB 上限）
 
 ### v1.36
 - **MiMo 未配置不再摘牌**：v1.35 把「`config.json` 里没有 `mimo` 段」当成抓取失败去计数，连续 3 轮后整个槽位被摘掉——刚加进去的 MiMo 图标反而永远看不见（日志里那句 `mimo 连续 3 次抓取无响应` 就是这个）。改为**未配置时保持挂载**（灰色虚线空环 + `--`，hover 详情写明原因），只有**配了端点却拉不到**才计入无响应、3 轮后摘牌；已在摘牌态的会在下一轮刷新自动挂回
