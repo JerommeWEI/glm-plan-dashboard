@@ -747,6 +747,33 @@ def _mimo_budget():
     return budget if budget > 0 else None
 
 
+def _mimo_baseline():
+    """返回 (官方已用量, 该时刻的本机账本读数)；缺任一项返回 (None, None)。
+
+    官方已用量只在账号侧（`mimo-server-cn/api/user/usage` 要小米账号会话，
+    那份 cookie 在 MiMo Desktop 运行时被独占锁死），只能由使用者从官网
+    「套餐使用情况」抄一次；`baseline_local` 记下抄数那一刻本机账本的值，
+    之后官方已用 = 基线官方值 + (本机当前 − 基线本机值)——**起点是官网真值、
+    增量是本机真值**，不编数字。别的设备在基线之后的消耗记不进来，
+    这是已知且写进 README 的边界。"""
+    mimo = _mimo_section()
+
+    def _num(key):
+        value = mimo.get(key)
+        if isinstance(value, bool):
+            return None
+        try:
+            n = float(value)
+        except (TypeError, ValueError):
+            return None
+        return n if n >= 0 else None
+
+    used, local = _num("baseline_used"), _num("baseline_local")
+    if used is None or local is None:
+        return None, None
+    return used, local
+
+
 def _mimo_config():
     """读取 config.json 的 mimo 段，返回 (url, headers)；未配置返回 (None, None)。
 
@@ -946,15 +973,26 @@ def _mimo_month_bounds(now=None):
 
 
 def _fetch_mimo_local():
-    """读 mimocode.db 统计本机本月消耗的 MiMo token，返回 dict 或 None。
+    """统计 MiMo 已用 token（官方基线 + 本机增量），返回 dict 或 None。
 
     只读打开（mode=ro&immutable=1）且不落任何写操作；库不存在 / 被锁 /
-    查询失败都返回 None。口径：assistant 消息的 tokens.input+output+
-    reasoning（**不含 cache.read**——缓存读通常不按原价计费，且引擎也没把
-    它算进 total 的主账），provider 只取 MiMo 自家（mimo-desktop 走桌面
-    代理、xiaomi* 走 Token Plan / 计费网关），别的供应商不算进 MiMo。
-    环的百分比只在 config.json 配了 mimo.budget 时才算——分母是套餐总量，
-    只有使用者知道，没有就保持虚线但如实报已用量。"""
+    查询失败都返回 None。
+
+    **口径**：assistant 消息的 `tokens.input+output+reasoning+cache.read+
+    cache.write`（即引擎的 `total`，**含缓存读**）——对过账：官网显示
+    664,754,691 已用，本机同口径 18 小时只有 102.7M，扣掉 cache.read 的
+    旧口径更是只有 4.2M，所以缓存读必须算进来才和官方一个量纲。provider
+    只取 MiMo 自家（`mimo-desktop` 走桌面代理、`xiaomi*` 走 Token Plan /
+    计费网关），别的供应商不算进 MiMo。
+
+    **基线**：官方已用量只在账号侧查不到，由使用者从官网抄一次写进
+    config（`baseline_used` + 同刻的 `baseline_local` + `baseline_at`）。
+    最终已用 = 官方基线 + (本机装机以来 − 基线时刻的本机值)。
+    **配了基线就改用「有史以来全部本机消耗」而不是自然月窗口**——官网
+    套餐是「11-12 到期」那种 13 号对 12 号的滚动周期，跟自然月对不齐，
+    按自然月切会让基线在月初失效、已用量凭空掉回基线。没配基线才退回
+    自然月口径（文案也写明是「本机本月」）。
+    环的百分比只在配了 `mimo.budget` 时才算，否则保持虚线但如实报已用量。"""
     if not MIMOCODE_DB.exists():
         return None
     lo, hi = _mimo_month_bounds()
@@ -975,7 +1013,17 @@ def _fetch_mimo_local():
     finally:
         conn.close()
 
-    used = 0
+    baseline_used, baseline_local = _mimo_baseline()
+    mimo = _mimo_section()
+    try:
+        baseline_at = float(mimo.get("baseline_at") or 0)
+    except (TypeError, ValueError):
+        baseline_at = 0.0
+    applied = (baseline_used is not None and baseline_local is not None
+               and 0 < baseline_at <= time.time() + 86400)
+
+    local_all = 0    # 装机以来全部（基线模式用这个）
+    local_month = 0  # 自然月内（无基线模式用这个）
     seen = 0
     for (raw,) in rows:
         try:
@@ -987,17 +1035,25 @@ def _fetch_mimo_local():
         provider = str(msg.get("providerID") or "")
         if provider != "mimo-desktop" and not provider.startswith("xiaomi"):
             continue
-        ts = (msg.get("time") or {}).get("created") or 0
-        if not (lo <= ts < hi):
-            continue
         tokens = msg.get("tokens") or {}
-        used += (int(tokens.get("input") or 0)
+        cache = tokens.get("cache") or {}
+        value = (int(tokens.get("input") or 0)
                  + int(tokens.get("output") or 0)
-                 + int(tokens.get("reasoning") or 0))
+                 + int(tokens.get("reasoning") or 0)
+                 + int(cache.get("read") or 0)
+                 + int(cache.get("write") or 0))
+        local_all += value
+        ts = (msg.get("time") or {}).get("created") or 0
+        if lo <= ts < hi:
+            local_month += value
         seen += 1
     if not seen:
         return None
     _gate_reset("mimo")
+
+    used = (baseline_used + max(0.0, local_all - baseline_local)
+            if applied else local_month)
+
     budget = _mimo_budget()
     return {
         # 没有预算就没有百分比：remaining 保持 None → 虚线空环
@@ -1007,6 +1063,8 @@ def _fetch_mimo_local():
         "plan": None,
         "monthly_remaining": None,
         "used_tokens": used,
+        "local_used": local_all,
+        "baseline_used": baseline_used if applied else None,
         "budget": budget,
         "source": "local",
     }
@@ -2092,6 +2150,7 @@ class GLMWidget:
         self._mimo_plan = mimo_saved.get("plan")
         self._mimo_used_tokens = mimo_saved.get("used")
         self._mimo_budget = mimo_saved.get("budget")
+        self._mimo_baseline_used = mimo_saved.get("baseline")
         self._pomo = _pomo_state()
         self._dim = 0.0           # 番茄钟闪烁调光系数 0~1（正弦淡出）
         self._blinking = False
@@ -2250,6 +2309,7 @@ class GLMWidget:
                     "plan": self._mimo_plan,
                     "used": self._mimo_used_tokens,
                     "budget": self._mimo_budget,
+                    "baseline": self._mimo_baseline_used,
                 },
             },
         }
@@ -2783,9 +2843,15 @@ class GLMWidget:
                 mp += f"（{h}h{rem // 60:02d}m 后重置）"
             parts.append(mp)
             if self._mimo_used_tokens is not None:
-                parts.append(
-                    f"MiMo 本机本月已用: {_fmt_tokens(self._mimo_used_tokens)}"
-                    " tokens（input+output+reasoning，不含缓存读）")
+                if self._mimo_baseline_used is not None:
+                    parts.append(
+                        f"MiMo 套餐已用: {_fmt_tokens(self._mimo_used_tokens)}"
+                        f" tokens（官网基线 {_fmt_tokens(self._mimo_baseline_used)}"
+                        " + 本机增量，其他设备在基线后的消耗未计入）")
+                else:
+                    parts.append(
+                        f"MiMo 本机本月已用: {_fmt_tokens(self._mimo_used_tokens)}"
+                        " tokens（含缓存读，未套官网基线）")
             if self._mimo_monthly_remaining is not None:
                 parts.append(f"MiMo 月额度剩余: {self._mimo_monthly_remaining:.0f}%")
         parts.append(f"番茄钟 {detail}")
@@ -3001,6 +3067,7 @@ class GLMWidget:
             self._mimo_plan = mimo["plan"]
             self._mimo_used_tokens = mimo.get("used_tokens")
             self._mimo_budget = mimo.get("budget")
+            self._mimo_baseline_used = mimo.get("baseline_used")
             if self._mimo_remaining is not None:
                 self._check_alert("mimo", "MiMo 套餐", self._mimo_remaining)
             self._save_state(throttle=True)

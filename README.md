@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.38
+# GLM Plan Dashboard v1.39
 
 GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，GLM 深蓝晶体、Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏五个图标圆环分别显示三源短期/套餐额度、Codex 周预算和当前番茄阶段剩余，图标下方显示百分比。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
 
@@ -31,25 +31,28 @@ GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深
 - 额度为 USD 计价订阅，无 5h 窗口：环语义取**周预算剩余比例**（如 (300-17.4)/300），hover 详情给「周 $17.4/$300 · 6天9h 后预计重置 · 今日 $17.4」；`daily_limit_usd=0` 且 `mode=unrestricted` 表示无日限额，今日已用只以文字呈现、绝不折算成比例
 - 周重置时刻由 `weekly_window_start + 7 天` 推算（服务端无显式 reset 字段），窗口起点在未来或已越过推算点时显示「等待窗口」而非编造倒计时；安全策略沿用 GLM 源（https + 域名白名单 + DNS 后私网阻断 + 禁重定向 + 响应体 64KB 上限）
 
-**MiMo 用量源（v1.35 槽位 · v1.36 空态语义 · v1.37 本机账本）**
-- MiMo 是 **token 套餐计量**，不是 GLM / Kimi 那种 5h 窗口百分比，而且**没有开箱即读的官方额度接口**（实测）：Token Plan 网关 `token-plan-cn.xiaomimimo.com/v1`（`tp-` key）只有 `/v1/models` 通，`/usage` `/quota` `/subscription` `/dashboard/billing` 等 50 多个候选路径全 404，对话响应头也不带限流头；账号级官方接口 `mimo-server-cn.xiaomimimo.com/api/user/usage` 存在（返回 `{code:0,data:{percent,resetDate}}`），但只认小米账号会话 cookie——那份库在 MiMo Desktop 运行期间被独占锁死，读不到
-- 因此默认走**本机账本**：`~/.local/share/mimocode/mimocode.db`（路径遵循 `MIMOCODE_HOME` / `XDG_DATA_HOME`）里每条 assistant 消息都记了 `tokens.{input,output,reasoning}` 与 `providerID`、时间戳，只读打开（`mode=ro&immutable=1`）统计**本机本月已消耗**。口径：`input + output + reasoning`，**不含 `cache.read`**（缓存读不按原价计费）；provider 只取 MiMo 自家（`mimo-desktop` 走桌面代理、`xiaomi*` 走 Token Plan / 计费网关），别的供应商不算进来
-- **环的分母（月度 token 预算）只有使用者知道**，写进 `config.json`：
+**MiMo 用量源（v1.35 槽位 · v1.36 空态语义 · v1.37 本机账本 · v1.39 官方基线）**
+- MiMo 是 **token 套餐计量**，不是 GLM / Kimi 那种 5h 窗口百分比，而且**没有开箱即读的官方额度接口**（实测）：Token Plan 网关 `token-plan-cn.xiaomimimo.com/v1`（`tp-` key）只有 `/v1/models` 通，`/usage` `/quota` `/subscription` `/dashboard/billing` 等 130+ 候选路径全 404，对话响应头也不带限流头；账号级官方接口 `mimo-server-cn.xiaomimimo.com/api/user/usage` 与 `/api/user/xiaomi/subscription/self` 存在（返回 `{code:0,data:{percent,resetDate}}`），但只认小米账号会话 cookie——那份库在 MiMo Desktop 运行期间被独占锁死，Chrome 里也没有 xiaomimimo 的 cookie；`platform.xiaomimimo.com/api/v1/*` 是网关统一 401（连 `/api/v1/zzzz` 都 401），枚举不出真路径
+- 因此走**本机账本 + 官方基线**：账本是 `~/.local/share/mimocode/mimocode.db`（路径遵循 `MIMOCODE_HOME` / `XDG_DATA_HOME`），只读打开（`mode=ro&immutable=1`）统计 assistant 消息的消耗。**口径 = `input + output + reasoning + cache.read + cache.write`（含缓存读，即引擎的 `total`）**——对过账：官网显示 664,754,691 已用时，本机同口径约 109.5M，而扣掉 `cache.read` 的旧口径只有 4.2M，量纲差 150 倍，缓存读必须算进来。provider 只取 MiMo 自家（`mimo-desktop` 走桌面代理、`xiaomi*` 走 Token Plan / 计费网关），别的供应商不算进来
+- **官方基线**（v1.39）：官方已用量只在账号侧，查不到就由使用者从官网「套餐使用情况」抄一次：
 
   ```json
   "mimo": {
-    "budget": 10000000,
-    "url":    "https://…/usage",
-    "token":  "…",
-    "auth":   "bearer",
+    "budget": 11000000000,
+    "baseline_used": 664754691,
+    "baseline_local": 109543046,
+    "baseline_at": 1791861505,
+    "url": "https://…/usage",
+    "token": "…",
+    "auth": "bearer",
     "header": "Authorization"
   }
   ```
 
-  配了 `budget` 环就画「(预算 − 本月已用) / 预算」；**没配就保持虚线空环**，但 hover 详情与主卡 tooltip 仍如实显示「已用 2.9M」——宁可不画比例，也不拿一个猜的分母算百分比
+  **最终已用 = `baseline_used` + (本机装机以来 − `baseline_local`)**——起点是官网真值、增量是本机真值，每个数都有出处。`baseline_local` / `baseline_at` 是抄数那一刻本机账本的值与时刻（自动记录，手工改基线时一起填）。配了基线就改用「装机以来全部本机消耗」而非自然月窗口：官网套餐是「11-12 到期」那种 13 号对 12 号的滚动周期，按自然月切会让基线在月初失效
+- **已知边界**：基线之后**别的设备**（网页 / 手机 / 其他电脑）的消耗记不进来，环会偏乐观；官网数字更新（续费、换套餐、跨周期）时把新数字告诉我重设基线即可。没配 `budget` 就保持虚线空环，但 hover 与 tooltip 仍如实显示已用量——宁可不画比例，也不拿猜的分母算百分比
 - `url` 是**可选**的远端端点，配了就优先于本机账本；`auth` 三选一：`bearer`（默认，`Authorization: Bearer <token>`）/ `header`（`header` 指定的头放原文，如 `X-Api-Key`）/ `cookie`（原文整段作为 `Cookie` 头）。远端响应按字段名做 ≤4 层浅查找：`remaining*` 当剩余、`percent` / `usedRatio` / `used*` 当已用（`100 − 已用`），数值 ≤1 按比例 ×100、>1 按百分数，字符串 `"41%"` 也能吃；重置点取 `reset*` / `nextResetTime` / `expire*`，兼容 epoch 秒、毫秒与 ISO-8601
 - 远端安全策略沿用 GLM / Codex 源：仅 https、DNS 解析后逐 IP 阻断私网/环回/链路本地/保留/组播地址、禁重定向（`_OPENER`）、响应体 64KB 上限、10s 超时、429 指数退避；因端点由使用者配置，不做硬编码域名白名单（白名单会让改配置立即失效）
-- **本机账本只覆盖「装上之后、这台机器」**：`mimocode.db` 是 MiMo Desktop 安装当天才建的，安装之前、以及手机/网页/别的电脑上的消耗都记不进来——所以「已用」是**下界**、环算出来的剩余是**上界**，总额度大（十亿级）时环会长期贴着 100%，真正要看的是 hover 里的已用绝对值
 - **两种来源都拿不到数**才返回 None（虚线空环 + `--`）。**没配远端端点**时槽位一直挂着（图标常在）；**配了远端端点却拉不到**才计入无响应，连续 3 轮后整个槽位自动摘牌、配通一次即挂回
 
 **番茄工作闹钟（下段）**
@@ -105,6 +108,12 @@ C:\Windows\explorer.exe "E:\GIT_Space\glm-plan-dashboard\launch-dashboard.vbs"
 在沙盒里直接 `wscript launch-dashboard.vbs`、`pythonw main.py` 或 `schtasks` 均不可行（前两者被 Job 连坐回收，后者被沙盒拦截）。进程在跑但看不到悬浮窗时，先检查它是否缩成了屏缘 6px 细条（鼠标触及该侧屏缘即滑出），位置记忆在 `ui_state.json`。
 
 ## 更新日志
+
+### v1.39
+- **MiMo 改成「官方基线 + 本机增量」，环终于和官网对上**：v1.37 只用本机账本，官网显示 `664,754,691 / 11,000,000,000 已用 6.0%`（剩 94%）时环却是 100%。两处差距——① 口径少了 `cache.read`（旧口径本机 4.2M，含缓存读才 109.5M，量纲差到 150 倍）；② 本机账本只覆盖「装机之后、这台机器」，官网是整个套餐周期 + 所有设备。现改为 `已用 = 官方基线 + (本机装机以来 − 基线时刻本机值)`，`baseline_used` / `baseline_local` / `baseline_at` 由使用者从官网抄一次写进 `config.json`，起点与增量都是真值
+- **口径补上缓存读**：`input+output+reasoning+cache.read+cache.write`（引擎的 `total`），与官方量纲一致；tooltip 文案按是否套了基线分别写「套餐已用（官网基线 + 本机增量）」/「本机本月已用（未套基线）」
+- **配基线后改用「装机以来」而非自然月窗口**：官网套餐是「11-12 到期」这种 13 号对 12 号的滚动周期，按自然月切会让基线在月初失效、已用量凭空掉回基线
+- 实测：基线 `664,754,691` 写入后环显示 **94%**，与官网「已使用 6.0%」一致（已验真）
 
 ### v1.38
 - **token 缩写补 B 档**：`_fmt_tokens` 增加十亿档（`11000000000 → 11.0B`）——Token Plan 的月预算是十亿级，只有 M 档会显示成「预算 11000.0M」，详情卡右列 ~74px 根本放不下
