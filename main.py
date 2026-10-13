@@ -863,6 +863,48 @@ def _mimo_number(value):
     return value * 100 if 0 <= value <= 1 else value
 
 
+def _mimo_quota_items(payload):
+    """收集响应里 `{name, used, limit}` 形式的配额项，按「plan 优先」返回
+    [(name, used, limit), ...]；没有合法项返回 []。
+
+    平台 `GET /api/v1/tokenPlan/usage` 就是这个形状：
+    `data.usage.items = [{name:"plan_total_token", used, limit, percent}, …]`，
+    同一响应里还会有 `month_total_token` / `compensation_*`——额度环要取
+    `plan_*`，长周期那条（`month_*`）给详情卡当副行。用 used/limit 现算，
+    不信 `percent` 字段（那是两位小数的取整值）。"""
+    candidates = []
+
+    def walk(node, depth):
+        if depth > 4 or len(candidates) > 20:
+            return
+        if isinstance(node, dict):
+            items = node.get("items")
+            if isinstance(items, list):
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    used, limit = it.get("used"), it.get("limit")
+                    if (isinstance(used, bool) or isinstance(limit, bool)
+                            or not isinstance(used, (int, float))
+                            or not isinstance(limit, (int, float))
+                            or not math.isfinite(used)
+                            or not math.isfinite(limit) or limit <= 0):
+                        continue
+                    name = str(it.get("name") or "")
+                    candidates.append(
+                        (0 if name.startswith("plan") else 1,
+                         name, float(used), float(limit)))
+            for value in node.values():
+                walk(value, depth + 1)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, depth + 1)
+
+    walk(payload, 0)
+    candidates.sort()
+    return [(name, used, limit) for _pref, name, used, limit in candidates]
+
+
 def _mimo_reset_ts(value):
     """重置时刻 → epoch 秒：支持秒 / 毫秒 / ISO-8601；解析不出返回 0（等待同步）。"""
     if isinstance(value, bool) or value is None:
@@ -918,7 +960,22 @@ def _fetch_mimo_remote():
         return None
     _gate_reset("mimo")
 
-    remaining = _mimo_number(_mimo_find(body, _mimo_REMAIN_KEYS))
+    # 1) 结构化配额项（平台 /api/v1/tokenPlan/usage：items[{name,used,limit}]）
+    #    优先 plan_*，用 used/limit 现算——响应里的 percent 是两位小数取整值
+    budget = _mimo_budget()
+    used_tokens = None
+    remaining = None
+    monthly = None
+    for name, used, limit in _mimo_quota_items(body):
+        if remaining is None:
+            used_tokens, budget = used, limit
+            remaining = (limit - used) / limit * 100
+        elif name.startswith("month") and limit > 0:
+            monthly = (limit - used) / limit * 100
+
+    # 2) 扁平字段（使用者自定义端点常见的 percent / remaining / usedRatio）
+    if remaining is None:
+        remaining = _mimo_number(_mimo_find(body, _MIMO_REMAIN_KEYS))
     if remaining is None:
         used = _mimo_number(_mimo_find(body, _MIMO_USED_KEYS))
         if used is not None:
@@ -933,9 +990,12 @@ def _fetch_mimo_remote():
                              "subscription", "packageName"))
     if not isinstance(plan, str) or not plan.strip():
         plan = None
-    monthly = _mimo_number(_mimo_find(
+    # 兜底只在找到时才写回——无条件赋值会把上面 items 算好的月额度冲成 None
+    monthly_found = _mimo_number(_mimo_find(
         body, ("monthly", "monthlyRemaining", "monthly_remaining",
                "monthRemaining", "month_remaining", "monthPercent")))
+    if monthly is None:
+        monthly = monthly_found
     return {
         "remaining": remaining,
         "reset_ts": _mimo_reset_ts(_mimo_find(
@@ -945,8 +1005,8 @@ def _fetch_mimo_remote():
         "plan": plan,
         "monthly_remaining": (max(0.0, min(100.0, monthly))
                               if monthly is not None else None),
-        "used_tokens": None,
-        "budget": _mimo_budget(),
+        "used_tokens": used_tokens,
+        "budget": budget,
         "source": "remote",
     }
 
@@ -1894,12 +1954,14 @@ def create_detail_image(info, target, glass=False):
         # 详情卡右列只有 ~74px，文案一律用短式；完整口径（含「不含缓存读」）
         # 放在主卡 tooltip 里
         used_text = None if used is None else f"已用 {_fmt_tokens(used)}"
-        if monthly is not None:
-            line_one = f"月额度 {monthly:.0f}%"
+        # 预算 / 套餐名优先于月额度：月额度和大数字是同一个百分比，放这行只是
+        # 重复；预算（11.0B）才是分母本身，信息量更大
+        if budget:
+            line_one = f"预算 {_fmt_tokens(budget)}"
         elif info["mimo_plan"]:
             line_one = info["mimo_plan"]
-        elif budget:
-            line_one = f"预算 {_fmt_tokens(budget)}"
+        elif monthly is not None:
+            line_one = f"月额度 {monthly:.0f}%"
         else:
             line_one = used_text or "套餐 --"
         if info["mimo_reset_ts"]:
