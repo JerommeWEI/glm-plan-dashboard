@@ -65,6 +65,10 @@ sys.stderr = _Tee(sys.stderr, _log_file)
 
 REFRESH_INTERVAL = 300      # 有会话活跃时的刷新间隔：5 分钟
 IDLE_REFRESH_INTERVAL = 600  # 全部源空闲（无会话活动）时降频到 10 分钟
+# MiMo 本机账本的独立快刷间隔：读的是本机 sqlite（约 600 行、毫秒级），
+# 没有网络也没有配额成本，没必要跟着 5 分钟的全源周期走——已用量要能
+# 跟着会话实时往下走。配了远端端点就退回全源周期，不空发网络请求。
+MIMO_FAST_INTERVAL = 10
 BACKOFF_BASE = 60           # 429 退避起步秒数，连续触发翻倍
 BACKOFF_CAP = 900           # 退避上限 15 分钟
 DEAD_AFTER = 3              # 连续多少次抓取无响应 → 摘掉该源图标（成功一次即恢复）
@@ -1698,10 +1702,17 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False,
     now = time.time()
     pct_font = _load_font(NUM_FONT, 11 * s)
 
-    def draw_percentage(y, value):
-        text = "--" if value is None else f"{max(0, min(100, value)):.0f}%"
+    def draw_percentage(y, value, decimals=0):
+        """环下的剩余百分比。decimals=1 用于 MiMo（token 套餐十亿级，整数
+        百分比 20 小时才挪 1%，一位小数才有变化可看）；宽度超过胶囊内侧就
+        退回整数——`100.0%` 六个字符在 44px 轨上会压到边缘。"""
+        text = ("--" if value is None
+                else f"{max(0, min(100, value)):.{decimals}f}%")
         color = TEXT_DIM if value is None else TEXT_SUB
         bbox = d.textbbox((0, 0), text, font=pct_font)
+        if decimals and value is not None and bbox[2] - bbox[0] > (WIDGET_W - 4) * s:
+            text = f"{max(0, min(100, value)):.0f}%"
+            bbox = d.textbbox((0, 0), text, font=pct_font)
         d.text((cx - (bbox[2] - bbox[0]) / 2 - bbox[0], y * s - bbox[1]),
                text, font=pct_font, fill=color)
 
@@ -1752,7 +1763,9 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False,
                 _draw_codex_mark(d, cx, cy, glyph_size)
         _draw_quota_badge(d, cx, cy, radius, remaining)
         _draw_activity_overlay(img, cx, cy, radius, activity.get(key), now)
-        draw_percentage(specs[i][1] + 19, remaining)
+        # MiMo 是十亿级 token 套餐，整数百分比几乎不动，显示一位小数
+        draw_percentage(specs[i][1] + 19, remaining,
+                        decimals=1 if key == "mimo" else 0)
 
     return img.resize((WIDGET_W, height), Image.LANCZOS)
 
@@ -1874,10 +1887,16 @@ def create_detail_image(info, target, glass=False):
         line_two = info["pomo_detail"]
         meta_x = 84
 
-    value_text = "--" if value is None else f"{max(0, min(100, value)):.0f}%"
     title_font = _load_font(ZH_FONT, 10 * s, ZH_WEIGHT)
     value_font = _load_font(NUM_FONT, 22 * s)
     meta_font = _load_font(ZH_FONT, 9 * s, ZH_WEIGHT)
+    # MiMo 的大数字与轨上一致带一位小数；宽度顶到 meta 列就退回整数
+    decimals = 1 if target == "mimo" else 0
+    value_text = ("--" if value is None
+                  else f"{max(0, min(100, value)):.{decimals}f}%")
+    if decimals and value is not None:
+        if d.textbbox((0, 0), value_text, font=value_font)[2] > (meta_x - 14) * s:
+            value_text = f"{max(0, min(100, value)):.0f}%"
     d.text((12 * s, 8 * s), title, font=title_font, fill=TEXT_SUB)
     d.text((12 * s, 25 * s), value_text, font=value_font,
            fill=TEXT_DIM if value is None else accent)
@@ -3104,6 +3123,19 @@ class GLMWidget:
             self._save_state(throttle=True)
         self._render()
 
+    def _mimo_fast_tick(self):
+        """MiMo 本机账本快刷（自愈守护，同 _poll_hover）：每
+        MIMO_FAST_INTERVAL 秒读一次，让已用量跟着会话往下走，不再等 5 分钟
+        的全源周期。只在**本机账本模式**下快刷——配了远端端点就交回全源
+        周期，不空发网络请求。schedule=False：这条链不并入全局刷新链。"""
+        try:
+            if _mimo_config()[0] is None:
+                self._refresh_source("mimo", schedule=False)
+        except Exception:
+            traceback.print_exc()
+        finally:
+            self.root.after(MIMO_FAST_INTERVAL * 1000, self._mimo_fast_tick)
+
     def _schedule(self):
         """调度下一轮全源刷新：有会话活跃（busy/blocked）按 5 分钟，
         全部源空闲时降频到 10 分钟（对齐 Codenotch 的空闲降频策略）。
@@ -3326,6 +3358,8 @@ class GLMWidget:
         self.root.after(500, self._do_refresh)    # Token 刷新
         self.root.after(1000, self._pomo_tick)    # 番茄钟启动
         self.root.after(150, self._poll_hover)    # 贴边隐藏 / 详情面板轮询
+        self.root.after(MIMO_FAST_INTERVAL * 1000,
+                        self._mimo_fast_tick)     # MiMo 本机账本 10s 快刷
         threading.Thread(target=self._activity_loop, daemon=True).start()  # 会话闲忙扫描
         self.root.mainloop()
 
