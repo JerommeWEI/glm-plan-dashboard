@@ -979,7 +979,7 @@ def _mimo_month_bounds(now=None):
 def _fetch_mimo_local():
     """统计 MiMo 已用 token（官方基线 + 本机增量），返回 dict 或 None。
 
-    只读打开（mode=ro&immutable=1）且不落任何写操作；库不存在 / 被锁 /
+    只读打开（`mode=ro`，优先可见 WAL）且不落任何写操作；库不存在 / 被锁 /
     查询失败都返回 None。
 
     **口径**：assistant 消息的 `tokens.input+output+reasoning+cache.read+
@@ -1001,21 +1001,33 @@ def _fetch_mimo_local():
         return None
     lo, hi = _mimo_month_bounds()
     import sqlite3
-    try:
-        conn = sqlite3.connect(
-            f"file:{MIMOCODE_DB}?mode=ro&immutable=1", uri=True)
-    except sqlite3.Error as exc:
-        print(f"MiMo 本机账本打不开: {exc}")
+    # 必须先试 mode=ro：`immutable=1` 的语义是「文件不可变，忽略锁与 WAL」，
+    # 会整个跳过 mimocode.db-wal——而主库几十分钟才 checkpoint 一次（实测
+    # 主库 mtime 落后 45 分钟），导致读到旧快照、最多滞后 45 分钟、少算
+    # 46 万 token。mode=ro 看得见 WAL 里的最新写入；只有 WAL 打不开
+    #（没有 -shm / 库被非 WAL 方式持有）时才退回 immutable，至少读到主库。
+    rows = None
+    last_error = None
+    for uri in (f"file:{MIMOCODE_DB}?mode=ro",
+                f"file:{MIMOCODE_DB}?mode=ro&immutable=1"):
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+        except sqlite3.Error as exc:
+            last_error = exc
+            continue
+        try:
+            rows = conn.execute(
+                "select data from message where data like '%\"role\":\"assistant\"%'"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            last_error = exc
+        finally:
+            conn.close()
+        if rows is not None:
+            break
+    if rows is None:
+        print(f"MiMo 本机账本查询失败: {last_error}")
         return None
-    try:
-        rows = conn.execute(
-            "select data from message where data like '%\"role\":\"assistant\"%'"
-        ).fetchall()
-    except sqlite3.Error as exc:
-        print(f"MiMo 本机账本查询失败: {exc}")
-        return None
-    finally:
-        conn.close()
 
     baseline_used, baseline_local = _mimo_baseline()
     mimo = _mimo_section()
@@ -1095,19 +1107,27 @@ ACTIVITY_SCAN_INTERVAL = 2.0       # 后台扫描周期（秒）
 
 
 def _activity_watchers():
-    """每个额度源的活动信号：(会话文件 glob 目录列表, 进程映像名关键字)。
+    """每个额度源的活动信号：(目标列表, 进程映像名关键字, 文件后缀)。
+
+    目标既可以是**目录**（walk 整棵树找匹配后缀的文件），也可以是**单个
+    文件**（只 stat 它本身）——MiMo 的账本是 sqlite，活跃信号必须看
+    mimocode.db-wal：主库几十分钟才 checkpoint 一次，看主库会滞后几十
+    分钟，而 WAL 每次落库（消息、任务、记忆）都会更新 mtime。
 
     - GLM：Claude Code 走 GLM 中转，会话写在 ~/.claude/projects/**/*.jsonl
     - Kimi：Kimi Code daemon 的会话事件流 server/events/session_*.jsonl
     - Codex：各账号目录 sessions/**/rollout-*.jsonl（slug 账号各自独立）
+    - MiMo：mimocode.db 主库 + -wal（文件直取，不 walk）
     """
     watchers = {
-        "glm": ([Path.home() / ".claude" / "projects"], ("claude",)),
-        "kimi": ([KIMI_HOME / "server" / "events"], ("kimi",)),
+        "glm": ([Path.home() / ".claude" / "projects"], ("claude",), (".jsonl",)),
+        "kimi": ([KIMI_HOME / "server" / "events"], ("kimi",), (".jsonl",)),
+        "mimo": ([MIMOCODE_DB, MIMOCODE_DB.with_name("mimocode.db-wal")],
+                 ("xiaomi mimo",), (".db", "-wal")),
     }
     for slug, home in CODEX_PROFILES:
         key = "codex" if not slug else f"codex:{slug}"
-        watchers[key] = ([home / "sessions"], ("codex",))
+        watchers[key] = ([home / "sessions"], ("codex",), (".jsonl",))
     # 停用的源不扫闲忙：槽位都不在轨上了，再弹「GLM 会话结束」只会莫名其妙
     for key in DISABLED_SOURCES:
         watchers.pop(key, None)
@@ -1157,11 +1177,22 @@ def _running_process_names():
     return _proc_cache[1]
 
 
-def _newest_mtime(dirs, suffix):
-    """目录树内指定后缀文件的最新 mtime（epoch 秒）；无文件返回 0。"""
+def _newest_mtime(targets, suffix):
+    """目标列表中匹配后缀者的最新 mtime（epoch 秒）；无匹配返回 0。
+
+    target 是目录就 walk 整棵树，是文件就直接 stat 它本身（sqlite 这种
+    单文件数据源没法按目录找，且 walk 一棵几万文件的树只为 stat 一个
+    文件太浪费）。suffix 可以是元组，`str.endswith` 原生支持。"""
     newest = 0.0
-    for root in dirs:
+    for root in targets:
         try:
+            if os.path.isfile(root):
+                if not os.path.basename(os.fspath(root)).endswith(suffix):
+                    continue
+                mtime = os.path.getmtime(root)
+                if mtime > newest:
+                    newest = mtime
+                continue
             for dirpath, _dirnames, filenames in os.walk(root):
                 for name in filenames:
                     if not name.endswith(suffix):
@@ -1187,8 +1218,8 @@ def scan_activity_states():
     now = time.time()
     states = {}
     procs = None
-    for key, (dirs, proc_keywords) in _activity_watchers().items():
-        age = now - _newest_mtime(dirs, ".jsonl")
+    for key, (dirs, proc_keywords, suffixes) in _activity_watchers().items():
+        age = now - _newest_mtime(dirs, suffixes)
         if age <= ACTIVITY_BUSY_WINDOW:
             states[key] = "busy"
             continue
@@ -3168,11 +3199,16 @@ class GLMWidget:
         if not self._activity:
             self._activity = states
         else:
-            names = {"glm": "GLM", "kimi": "Kimi"}
+            names = {"glm": "GLM", "kimi": "Kimi", "mimo": "MiMo"}
             for key, new in states.items():
                 old = self._activity.get(key)
                 self._activity[key] = new
                 if old == "busy" and new != "busy":
+                    if key == "mimo":
+                        # MiMo Desktop 自己就弹「任务完成」通知（设置里的
+                        # taskNotifications.completion），每轮对话结束再弹
+                        # 一条是重复；呼吸灯与刷新节奏照常生效
+                        continue
                     name = names.get(key)
                     if name is None:
                         slug = key.split(":", 1)[1] if ":" in key else ""

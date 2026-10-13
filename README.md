@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.41
+# GLM Plan Dashboard v1.42
 
 GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏四个图标圆环分别显示短期/套餐额度、Codex 周预算和当前番茄阶段剩余，图标下方显示百分比（**GLM 源 v1.40 起暂时停用**，见 `DISABLED_SOURCES`，删掉那个元组里的 `"glm"` 即可恢复）。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
 
@@ -55,6 +55,7 @@ GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深
 - `url` 是**可选**的远端端点，配了就优先于本机账本；`auth` 三选一：`bearer`（默认，`Authorization: Bearer <token>`）/ `header`（`header` 指定的头放原文，如 `X-Api-Key`）/ `cookie`（原文整段作为 `Cookie` 头）。远端响应按字段名做 ≤4 层浅查找：`remaining*` 当剩余、`percent` / `usedRatio` / `used*` 当已用（`100 − 已用`），数值 ≤1 按比例 ×100、>1 按百分数，字符串 `"41%"` 也能吃；重置点取 `reset*` / `nextResetTime` / `expire*`，兼容 epoch 秒、毫秒与 ISO-8601
 - 远端安全策略沿用 GLM / Codex 源：仅 https、DNS 解析后逐 IP 阻断私网/环回/链路本地/保留/组播地址、禁重定向（`_OPENER`）、响应体 64KB 上限、10s 超时、429 指数退避；因端点由使用者配置，不做硬编码域名白名单（白名单会让改配置立即失效）
 - **两种来源都拿不到数**才返回 None（虚线空环 + `--`）。**没配远端端点**时槽位一直挂着（图标常在）；**配了远端端点却拉不到**才计入无响应，连续 3 轮后整个槽位自动摘牌、配通一次即挂回
+- **闲忙信号**：会话文件取 `mimocode.db` 主库 + `-wal` 的 mtime（`_newest_mtime` 支持单个文件目标，不 walk 整棵树）；忙=整环白色呼吸灯、停写但 MiMo Desktop 进程仍在=琥珀脉冲，与其它源同一套语义（90s / 15min）。**会话结束 toast 对 MiMo 抑制**——MiMo Desktop 自己就弹「任务完成」，每轮对话再弹一条是重复；呼吸灯与刷新节奏不受影响
 
 **番茄工作闹钟（下段）**
 - 锚定作息表：工作日 9:00–11:30、13:30–18:00 两个时段内连续跑「45 分钟工作 ↔ 15 分钟休息」；时段尾自然截断（上午 11:00–11:30、下午 17:30–18:00 为 30 分钟收尾工作段，倒计时递减到 0 正好落在午休/下班边界）
@@ -111,6 +112,11 @@ C:\Windows\explorer.exe "E:\GIT_Space\glm-plan-dashboard\launch-dashboard.vbs"
 在沙盒里直接 `wscript launch-dashboard.vbs`、`pythonw main.py` 或 `schtasks` 均不可行（前两者被 Job 连坐回收，后者被沙盒拦截）。进程在跑但看不到悬浮窗时，先检查它是否缩成了屏缘 6px 细条（鼠标触及该侧屏缘即滑出），位置记忆在 `ui_state.json`。
 
 ## 更新日志
+
+### v1.42
+- **修 MiMo 读数严重滞后**：账本查询用了 `mode=ro&immutable=1`——该参数的语义是「文件不可变，忽略锁与 **WAL**」，于是整个跳过 `mimocode.db-wal`，只读主库的旧快照；而主库几十分钟才 checkpoint 一次（实测主库 mtime 落后 45 分钟）。同刻对比：`immutable` 读到的最新记录距今 **250s**、账本少算 **462,375 token**，`mode=ro` 是 **106s**。改为优先 `mode=ro`（看得见 WAL 的最新写入），WAL 打不开（没有 `-shm` / 库被非 WAL 方式持有）才退回 `immutable` 兜底
+- **MiMo 呼吸灯接上了**（此前从未工作）：会话闲忙靠 `_activity_watchers()` 给信号，而 v1.35 加 MiMo 槽位时没给它加 watcher，`activity.get("mimo")` 恒为 `None`，v1.33 那套柔光呼吸灯从没画过。现补上：信号取 `mimocode.db` 主库 + `-wal` 的 mtime（`_newest_mtime` 新增**单个文件目标**支持 + `endswith` 多后缀），进程关键字 `xiaomi mimo`；忙 / 阻塞语义与其它源一致（90s / 15min）。实测环带亮度 80.1 → 73.0 → 66.4 → 83.6 周期起伏（2.4s 正弦），截图见峰值柔光与谷值裸环
+- 会话结束 toast 对 MiMo **抑制**：MiMo Desktop 自己就弹「任务完成」（设置里的 `taskNotifications.completion`），每轮对话结束再弹一条是重复；呼吸灯与刷新节奏不受影响
 
 ### v1.41
 - **MiMo 快刷到 10 秒**：本机账本是纯本地 sqlite（约 600 行、毫秒级），没有网络也没有配额成本，却跟着 5 分钟的全源周期走，已用量看起来「不更新」。新增 `MIMO_FAST_INTERVAL = 10` 的独立 `after` 链（`_mimo_fast_tick`，自愈守护同 `_poll_hover`），只在**本机账本模式**下启用、`schedule=False` 不并入全局刷新链；配了远端端点就交回全源周期，不空发网络请求。实测 70 秒内 `ui_state.json` 被重写（5 分钟链那次还没到）
