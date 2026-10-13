@@ -2811,10 +2811,16 @@ class GLMWidget:
         self._render()
 
     def _apply_mimo_usage(self, mimo):
-        """UI 线程应用 MiMo 抓取结果；端点未配置 / 不可达时保持既有读数，
-        从未有过数据则保持 None（虚线空环，不伪造读数）。"""
+        """UI 线程应用 MiMo 抓取结果；从未有过数据则保持 None（虚线空环，
+        不伪造读数）。
+
+        「config.json 里没有 mimo 段」是刻意的空态而非故障：图标保持挂载，
+        用户随时能看到这一槽、hover 也能读到「未配置」的原因；只有配了端点
+        却拉不到（域名不通 / 鉴权失败 / 响应里没读数）才计入无响应，连续
+        DEAD_AFTER 轮后摘牌、配通一次即挂回。"""
         self._last_refresh = datetime.now().strftime("%H:%M:%S")
-        self._note_fetch_result("mimo", bool(mimo))
+        self._note_fetch_result(
+            "mimo", bool(mimo) or _mimo_config()[0] is None)
         if mimo:
             self._mimo_remaining = mimo["remaining"]
             self._set_targets(mimo=self._mimo_remaining)
