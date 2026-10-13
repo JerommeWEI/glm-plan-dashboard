@@ -1,6 +1,6 @@
-# GLM Plan Dashboard v1.39
+# GLM Plan Dashboard v1.40
 
-GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，GLM 深蓝晶体、Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏五个图标圆环分别显示三源短期/套餐额度、Codex 周预算和当前番茄阶段剩余，图标下方显示百分比。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
+GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏四个图标圆环分别显示短期/套餐额度、Codex 周预算和当前番茄阶段剩余，图标下方显示百分比（**GLM 源 v1.40 起暂时停用**，见 `DISABLED_SOURCES`，删掉那个元组里的 `"glm"` 即可恢复）。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
 
 ## 预览
 
@@ -19,12 +19,12 @@ GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深
 - **左右贴边自动隐藏**：卡片左/右缘进入所在屏对应竖边 24px 内（两边都够到取更近者）松手，空闲 1.2 秒滑入该侧屏缘，露出 6px **竖向番茄进度条**（水位式：满格齐顶、随剩余时间自上而下回落，落空即到点；剩余 >50% 绿 / 20–50% 黄 / <20% 红）；鼠标触及该侧屏缘即滑出（启动后 5 秒宽限期不隐藏；拖离屏缘后不启用）。左/右停靠全对称：细边热区、region 裁剪、所在屏判定锚点、hover 面板展开方向（左停靠向右展开）随停靠侧镜像，跨屏拖动到哪块屏就贴哪块屏，停靠侧与位置记忆在 `ui_state.json`（旧文件无 `side` 字段按右停靠兼容）
 - **hover 详情面板**：悬停单个图标 0.3 秒，在其靠屏内一侧展开 168×64 的局部详情卡片；切换图标只更新对应项，离开轨道和卡片 0.3 秒后收起
 
-**状态轨（v1.28 · v1.35 扩至五槽）**
-- 44px 宽的完整胶囊内固定五枚圆环：GLM 5h 短期额度（深蓝晶体）、Kimi 5h 短期额度（绿色星芒）、Codex 周预算（洋红终端符）、MiMo 套餐剩余（橙色气泡火花）、当前番茄阶段剩余（工作紫 / 休息 teal / 非工作灰）。每枚图标下方显示对应剩余百分比，图标和位置保持固定，便于形成空间记忆。
-- 平台主色不随额度变化，低于 40% 时用橙色小点提示，低于 15% 时用红色小点提示；精确百分比、重置时间、GLM 周额度、Kimi 月额度、Codex 周绝对值（$已用/$上限）与今日消耗、MiMo 本机本月已用 token 数与预算全部保留在 hover 详情中。
+**状态轨（v1.28 · v1.35 扩至五槽 · v1.40 GLM 暂停用 → 四槽）**
+- 44px 宽的完整胶囊内固定圆环：Kimi 5h 短期额度（绿色星芒）、Codex 周预算（洋红终端符）、MiMo 套餐剩余（橙色气泡火花）、当前番茄阶段剩余（工作紫 / 休息 teal / 非工作灰）。每枚图标下方显示对应剩余百分比，图标和位置保持固定，便于形成空间记忆。**GLM 深蓝晶体槽当前停用**：`main.py` 的 `DISABLED_SOURCES = ("glm",)` 一并关掉槽位、周期刷新与闲忙通知（与「故障摘牌」不同——摘牌仍会周期探测并可能复活刷日志，停用是彻底不碰），fetch / 图标 / 详情卡 / 告警代码全部保留，删掉元组里的 `"glm"` 即恢复
+- 平台主色不随额度变化，低于 40% 时用橙色小点提示，低于 15% 时用红色小点提示；精确百分比、重置时间、Kimi 月额度、Codex 周绝对值（$已用/$上限）与今日消耗、MiMo 套餐已用 token 数与预算全部保留在 hover 详情中（GLM 周额度在启用时一并显示）
 - Kimi 本地 daemon、Codex 中转、MiMo 端点不可用时显示灰色虚线占位环，真实额度耗尽仍是红色警示点；番茄非工作时段使用灰色沙漏环，不把它误报为额度耗尽。
 - 主轨只在状态变化时重绘：番茄钟每秒一帧、额度刷新后的缓动才 30fps，保留原有离屏 Pillow + Win32 分层窗口路径，无额外运行时依赖。
-- 每 5 分钟自动刷新数据，三源（GLM 走配置的 API、Kimi 走本地 daemon、Codex 走中转站 `/v1/usage`）各自独立线程拉取与落地，任一源超时不拖慢其余源的 UI 更新
+- 每 5 分钟自动刷新数据，各源（Kimi 走本地 daemon、Codex 走中转站 `/v1/usage`、MiMo 走本机账本）各自独立线程拉取与落地，任一源超时不拖慢其余源的 UI 更新
 
 **Codex 用量源（v1.28）**
 - 数据来自 Codex CLI 所配中转站（`~/.codex/config.toml` 顶层 `model_provider` 指向供应商的 `base_url`，白名单 `uapi.ccwu.cc`；key 为 `~/.codex/auth.json` 的 `OPENAI_API_KEY`，Bearer 鉴权），请求 `GET {base}/v1/usage`
@@ -88,6 +88,8 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 
 **API 配置来源（优先级从高到低）**：
 
+> **GLM 源当前停用（v1.40）**：`main.py` 的 `DISABLED_SOURCES = ("glm",)` 会一并跳过状态轨槽位、周期刷新与闲忙通知，所以下面这套 GLM 配置优先级暂时用不上（也就不必再为它修 key）。要恢复：删掉该元组里的 `"glm"`；若 key 已失效，先按下方「刷新兜底 key」重跑 `setup_config.py`。
+
 1. **ZCode 当前配置（默认生效，自动跟随更新）**：`~/.zcode/cli/config.json` 的 `model.providerId` 记录 ZCode 当前选中的供应商，其 `apiKey` / `baseURL` 明文存于 `~/.zcode/v2/config.json` 的 `provider[<id>].options`。仪表盘每次刷新（5 分钟）都现读这两个文件，**在 ZCode 里换 key、换供应商后无需任何手动操作**，最迟一个刷新周期自动生效。若活动供应商无可用 key（如切换到 OAuth 类套餐），自动改用配置中任一已启用且带 key 的供应商。
 2. **项目 `config.json`**（已被 `.gitignore` 忽略，不会上传 key）：ZCode 不可用时的独立兜底，由 `setup_config.py` 固化。
 3. **环境变量** `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`。
@@ -95,7 +97,7 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 
 > **刷新兜底 key**：兜底 `config.json` 里的 key 过期后，重跑 `python setup_config.py` 即可——它会跳过已有 `config.json`，从 ZCode / 环境变量 / `~/.claude/settings.json` 读取最新配置写入（只覆盖 `base_url` / `token`，`mimo` 等手工段原样保留）。
 
-> **MiMo 用量**：默认零配置——自动统计本机 mimocode 账本里本月已消耗的 token（hover 可见）。想让橙环画出百分比，在 `config.json` 里加 `"mimo": {"budget": <月度 token 预算>}`（见上方「MiMo 用量源」）；另可选 `url`/`token` 指到远端额度端点。最迟一个刷新周期生效。
+> **MiMo 用量**：走本机账本 + 官方基线（`config.json` 的 `mimo.budget` / `baseline_used` / `baseline_local` / `baseline_at`，见上方「MiMo 用量源」），零配置也有「本机本月已用」。官网数字变了把新值告诉我重设基线即可；另可选 `url`/`token` 指到远端额度端点。最迟一个刷新周期生效。
 
 **开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
@@ -108,6 +110,9 @@ C:\Windows\explorer.exe "E:\GIT_Space\glm-plan-dashboard\launch-dashboard.vbs"
 在沙盒里直接 `wscript launch-dashboard.vbs`、`pythonw main.py` 或 `schtasks` 均不可行（前两者被 Job 连坐回收，后者被沙盒拦截）。进程在跑但看不到悬浮窗时，先检查它是否缩成了屏缘 6px 细条（鼠标触及该侧屏缘即滑出），位置记忆在 `ui_state.json`。
 
 ## 更新日志
+
+### v1.40
+- **GLM 源暂时停用**：key 失效后接口恒回 `Authentication Failed`，连续 3 轮就摘牌、重启又挂回来，日志被刷满，而使用者暂时不用 GLM。新增 `DISABLED_SOURCES = ("glm",)`——**一处开关同时关掉状态轨槽位、周期刷新与闲忙通知**（停用 ≠ 故障摘牌：摘牌仍会周期探测、成功一次就复活并刷日志，停用是彻底不碰）。状态轨由五槽回四槽（Kimi / Codex / MiMo / 番茄，`WIDGET_H` 312 → 252，仍由 `SLOT_LAYOUT` 单一派生）。**fetch、图标、详情卡、告警代码全部保留**，删掉元组里的 `"glm"` 即恢复；README 的「API 配置来源」加了停用说明
 
 ### v1.39
 - **MiMo 改成「官方基线 + 本机增量」，环终于和官网对上**：v1.37 只用本机账本，官网显示 `664,754,691 / 11,000,000,000 已用 6.0%`（剩 94%）时环却是 100%。两处差距——① 口径少了 `cache.read`（旧口径本机 4.2M，含缓存读才 109.5M，量纲差到 150 倍）；② 本机账本只覆盖「装机之后、这台机器」，官网是整个套餐周期 + 所有设备。现改为 `已用 = 官方基线 + (本机装机以来 − 基线时刻本机值)`，`baseline_used` / `baseline_local` / `baseline_at` 由使用者从官网抄一次写进 `config.json`，起点与增量都是真值

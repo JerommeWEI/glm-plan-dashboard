@@ -1104,6 +1104,9 @@ def _activity_watchers():
     for slug, home in CODEX_PROFILES:
         key = "codex" if not slug else f"codex:{slug}"
         watchers[key] = ([home / "sessions"], ("codex",))
+    # 停用的源不扫闲忙：槽位都不在轨上了，再弹「GLM 会话结束」只会莫名其妙
+    for key in DISABLED_SOURCES:
+        watchers.pop(key, None)
     return watchers
 
 
@@ -1371,10 +1374,18 @@ RAIL_RADIUS = WIDGET_W // 2
 # 百分比文字顶 / 总高）全部由它推导——加槽只改这一处，不再五处同步。
 # Codex 多账号（~/.codex-<slug>）各占一槽，位置固定不互换。
 # MiMo 排在各 LLM 源之后、番茄钟之前：上段全是额度源，下段是时间源。
-SLOT_LAYOUT = (["glm", "kimi"]
-               + ["codex" if not slug else f"codex:{slug}"
-                  for slug, _ in CODEX_PROFILES]
-               + ["mimo", "pomo"])
+#
+# 暂时停用的源：既不进状态轨，也不参与周期刷新与闲忙通知。停用 ≠ 故障摘牌
+# ——摘牌仍会周期探测、成功一次就复活并刷日志；这里是彻底关掉。GLM 的 key
+# 当前失效（接口恒回 Authentication Failed），使用者暂不用它，需要时把
+# "glm" 从这个元组里删掉即可：fetch、图标、详情卡、告警代码全都还在。
+DISABLED_SOURCES = ("glm",)
+
+_SLOT_KEYS = (["glm", "kimi"]
+              + ["codex" if not slug else f"codex:{slug}"
+                 for slug, _ in CODEX_PROFILES]
+              + ["mimo", "pomo"])
+SLOT_LAYOUT = tuple(k for k in _SLOT_KEYS if k not in DISABLED_SOURCES)
 
 
 def _slot_specs(keys):
@@ -2783,15 +2794,16 @@ class GLMWidget:
             m, s = divmod(max(0, p["remaining"]), 60)
             detail = f"{p['label']} {m:02d}:{s:02d}"
         parts = []
-        if "glm" in self._dead:
-            parts.append("GLM: API 无响应，图标已暂时摘除（恢复后自动回归）")
-        else:
-            parts.append(f"GLM 短期剩余: {self._token_remaining:.0f}%")
-            if self._quota_reset_ts:
-                left = max(0, self._quota_reset_ts - time.time())
-                h, rem = divmod(int(left), 3600)
-                parts[0] += f"（{h}h{rem // 60:02d}m 后重置）"
-            parts.append(f"GLM 周额度剩余: {self._weekly_remaining:.0f}%")
+        if "glm" not in DISABLED_SOURCES:
+            if "glm" in self._dead:
+                parts.append("GLM: API 无响应，图标已暂时摘除（恢复后自动回归）")
+            else:
+                parts.append(f"GLM 短期剩余: {self._token_remaining:.0f}%")
+                if self._quota_reset_ts:
+                    left = max(0, self._quota_reset_ts - time.time())
+                    h, rem = divmod(int(left), 3600)
+                    parts[-1] += f"（{h}h{rem // 60:02d}m 后重置）"
+                parts.append(f"GLM 周额度剩余: {self._weekly_remaining:.0f}%")
         if "kimi" in self._dead:
             parts.append("Kimi: 无响应，图标已暂时摘除（恢复后自动回归）")
         elif self._kimi_remaining is None:
@@ -2957,9 +2969,9 @@ class GLMWidget:
 
     def _do_refresh(self):
         """全源刷新：各自独立线程拉取（任一源超时不拖累其余源 UI 更新）。"""
-        self._refresh_source("glm", schedule=False)
-        self._refresh_source("kimi", schedule=False)
-        self._refresh_source("mimo", schedule=False)
+        for key in ("glm", "kimi", "mimo"):
+            if key not in DISABLED_SOURCES:
+                self._refresh_source(key, schedule=False)
         for slug, home in CODEX_PROFILES:
             self._refresh_source(self._codex_key(slug), schedule=False)
         self._schedule()
