@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.37
+# GLM Plan Dashboard v1.38
 
 GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，GLM 深蓝晶体、Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏五个图标圆环分别显示三源短期/套餐额度、Codex 周预算和当前番茄阶段剩余，图标下方显示百分比。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
 
@@ -49,6 +49,7 @@ GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深
   配了 `budget` 环就画「(预算 − 本月已用) / 预算」；**没配就保持虚线空环**，但 hover 详情与主卡 tooltip 仍如实显示「已用 2.9M」——宁可不画比例，也不拿一个猜的分母算百分比
 - `url` 是**可选**的远端端点，配了就优先于本机账本；`auth` 三选一：`bearer`（默认，`Authorization: Bearer <token>`）/ `header`（`header` 指定的头放原文，如 `X-Api-Key`）/ `cookie`（原文整段作为 `Cookie` 头）。远端响应按字段名做 ≤4 层浅查找：`remaining*` 当剩余、`percent` / `usedRatio` / `used*` 当已用（`100 − 已用`），数值 ≤1 按比例 ×100、>1 按百分数，字符串 `"41%"` 也能吃；重置点取 `reset*` / `nextResetTime` / `expire*`，兼容 epoch 秒、毫秒与 ISO-8601
 - 远端安全策略沿用 GLM / Codex 源：仅 https、DNS 解析后逐 IP 阻断私网/环回/链路本地/保留/组播地址、禁重定向（`_OPENER`）、响应体 64KB 上限、10s 超时、429 指数退避；因端点由使用者配置，不做硬编码域名白名单（白名单会让改配置立即失效）
+- **本机账本只覆盖「装上之后、这台机器」**：`mimocode.db` 是 MiMo Desktop 安装当天才建的，安装之前、以及手机/网页/别的电脑上的消耗都记不进来——所以「已用」是**下界**、环算出来的剩余是**上界**，总额度大（十亿级）时环会长期贴着 100%，真正要看的是 hover 里的已用绝对值
 - **两种来源都拿不到数**才返回 None（虚线空环 + `--`）。**没配远端端点**时槽位一直挂着（图标常在）；**配了远端端点却拉不到**才计入无响应，连续 3 轮后整个槽位自动摘牌、配通一次即挂回
 
 **番茄工作闹钟（下段）**
@@ -104,6 +105,11 @@ C:\Windows\explorer.exe "E:\GIT_Space\glm-plan-dashboard\launch-dashboard.vbs"
 在沙盒里直接 `wscript launch-dashboard.vbs`、`pythonw main.py` 或 `schtasks` 均不可行（前两者被 Job 连坐回收，后者被沙盒拦截）。进程在跑但看不到悬浮窗时，先检查它是否缩成了屏缘 6px 细条（鼠标触及该侧屏缘即滑出），位置记忆在 `ui_state.json`。
 
 ## 更新日志
+
+### v1.38
+- **token 缩写补 B 档**：`_fmt_tokens` 增加十亿档（`11000000000 → 11.0B`）——Token Plan 的月预算是十亿级，只有 M 档会显示成「预算 11000.0M」，详情卡右列 ~74px 根本放不下
+- **写清本机账本的覆盖边界**：`mimocode.db` 是 MiMo Desktop 安装当天才建的，安装前、以及别的设备上的消耗记不进来——「已用」是下界、剩余是上界，总额度大时环会长期贴 100%，要看的是 hover 里的已用绝对值（功能小节已补这条说明）
+- 本机账本 + `mimo.budget` 组合现已实测跑通：`已用 3.5M / 预算 11.0B → 环 100%`，读数落盘 `ui_state.json` 的 `readings.mimo`
 
 ### v1.37
 - **MiMo 改读本机账本（默认零配置）**：官方额度接口走不通——Token Plan 网关 50 多个候选路径全 404，账号级 `/api/user/usage` 只认小米账号会话 cookie（MiMo Desktop 运行时那份库被独占锁死）。改为只读打开 `~/.local/share/mimocode/mimocode.db`，按 assistant 消息的 `tokens.{input,output,reasoning}` 统计**本机本月已消耗**（`input+output+reasoning`，不含 `cache.read`；provider 只取 `mimo-desktop` / `xiaomi*`），hover 与详情卡如实显示「已用 2.9M」这类事实读数
