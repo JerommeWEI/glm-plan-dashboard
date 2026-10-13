@@ -1,10 +1,10 @@
-"""GLM + Kimi + Codex 用量悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨贴靠屏幕左/右缘
+"""GLM + Kimi + Codex + MiMo 用量悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨贴靠屏幕左/右缘
 
 Win11 Acrylic 真毛玻璃状态轨：GLM 深蓝几何晶体、Kimi 绿色星芒、Codex 洋红
-终端符、番茄沙漏四个图标槽位的圆环分别表示两源短期额度、Codex 周预算和
-当前番茄阶段剩余。拖到任意屏松手就近贴边（左/右缘皆可，跨屏生效），悬停
-从停靠侧对缘展开详情面板，空闲时自动缩成停靠侧 6px 水位式番茄进度条
-（满格齐顶、随剩余时间自上而下回落）。
+终端符、MiMo 橙色气泡火花、番茄沙漏五个图标槽位的圆环分别表示三源额度、
+Codex 周预算、MiMo 套餐剩余和当前番茄阶段剩余。拖到任意屏松手就近贴边
+（左/右缘皆可，跨屏生效），悬停从停靠侧对缘展开详情面板，空闲时自动缩成
+停靠侧 6px 水位式番茄进度条（满格齐顶、随剩余时间自上而下回落）。
 """
 
 import ctypes
@@ -685,6 +685,202 @@ def fetch_codex_usage(home=CODEX_HOME, source="codex"):
         return None
 
 
+# ── MiMo 用量（config.json 可配置端点）──────────────────────────────
+# MiMo 没有「装好即可读」的额度接口：Token Plan 网关（mimocode.jsonc 里的
+# tp- key）只有 /v1/models 这类模型接口，账号级 /user/usage 又要小米
+# 账号会话 cookie（MiMo Desktop 运行时该库被独占锁住，读不到）。因此这一
+# 源照抄 GLM 的「配置驱动」思路，端点与凭证由使用者写进 config.json：
+#
+#   "mimo": {
+#     "url":   "https://…/usage",     # 必填，https（见 _validated_mimo_url）
+#     "token": "…",                   # 选填，凭证原文
+#     "auth":  "bearer",              # bearer(默认) / header / cookie
+#     "header": "Authorization"       # 选填，自定义头名，auth=header 时常用
+#   }
+#
+# 响应里按字段名浅层找读数（≤4 层，命中即停）：remaining* 视为剩余、
+# percent / usedRatio / used* 视为已用；数值 ≤1 按比例 ×100，>1 按百分数。
+# 重置点取 reset* / nextResetTime / expire*，兼容 epoch 秒 / 毫秒 / ISO8601。
+# 未配置、域名不通、鉴权失败统一返回 None——界面走虚线空环 + "--"，
+# 与 Kimi daemon 不在跑时同一语义，绝不伪造读数。
+MIMO_MAX_BYTES = 65536   # 响应体上限（沿用 Codex 的 64KB 约束）
+
+
+def _mimo_config():
+    """读取 config.json 的 mimo 段，返回 (url, headers)；未配置返回 (None, None)。
+
+    每次刷新都现读文件，改完 config.json 最迟一个刷新周期生效，与 ZCode
+    配置「自动跟随」同一习惯。"""
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            mimo = json.load(f).get("mimo") or {}
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    url = str(mimo.get("url") or "").strip()
+    token = str(mimo.get("token") or "").strip()
+    if not url:
+        return None, None
+    headers = {"Accept": "application/json", "Accept-Language": "en-US,en"}
+    if token:
+        mode = str(mimo.get("auth") or "bearer").lower()
+        name = str(mimo.get("header") or "Authorization")
+        if mode == "header":          # 自定义头直接放原文（如 X-Api-Key: sk-…）
+            headers[name] = token
+        elif mode == "cookie":        # 手工粘贴的 Cookie 串
+            headers["Cookie"] = token
+        else:                         # bearer（默认）
+            headers[name] = f"Bearer {token}"
+    return url, headers
+
+
+def _validated_mimo_url(url):
+    """SSRF 防护：仅允许 https，DNS 解析后逐 IP 阻断私网 / 环回 / 链路
+    本地 / 保留 / 组播地址。端点由使用者配置，故不做硬编码域名白名单
+    （白名单会让功能在改配置后立刻失效），其余策略与 GLM / Codex 一致。"""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    try:
+        infos = socket.getaddrinfo(
+            parsed.hostname, 443, socket.AF_UNSPEC, socket.SOCK_STREAM
+        )
+    except socket.gaierror:
+        return None
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast):
+            return None
+    return url
+
+
+def _mimo_find(payload, keys, depth=0):
+    """在 JSON 里按字段名有限深度（≤4 层）查找，返回首个命中值。
+
+    只看 dict 的 key 名与 list 元素，不做模糊匹配——响应结构由使用者的
+    端点决定，宁可找不到也不猜一个数字出来。"""
+    if depth > 4:
+        return None
+    if isinstance(payload, dict):
+        for key in keys:
+            if key in payload and payload[key] is not None:
+                return payload[key]
+        for value in payload.values():
+            found = _mimo_find(value, keys, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _mimo_find(item, keys, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _mimo_number(value):
+    """把接口给的比例/百分数/带 % 的字符串统一成 0~100 的数值；解析失败返回 None。
+
+    ≤1 视为比例（0.62 → 62），>1 视为百分数——usedRatio 与 percent 两种
+    常见写法都覆盖，避免再按字段名分支。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        value = value.strip().rstrip("%").strip()
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return value * 100 if 0 <= value <= 1 else value
+
+
+def _mimo_reset_ts(value):
+    """重置时刻 → epoch 秒：支持秒 / 毫秒 / ISO-8601；解析不出返回 0（等待同步）。"""
+    if isinstance(value, bool) or value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1e12:      # 毫秒
+            ts /= 1000
+        # 远古（<2000 年）与未来（>2100 年）都当垃圾数据，不编倒计时
+        return ts if 946684800 < ts < 4102444800 else 0.0
+    if isinstance(value, str):
+        text = value.strip().replace("Z", "+00:00")
+        try:
+            return _mimo_reset_ts(datetime.fromisoformat(text).timestamp())
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+_MIMO_USED_KEYS = ("usedRatio", "used_ratio", "usedPercent", "used_percent",
+                   "percent", "usage", "used", "consumed")
+_MIMO_REMAIN_KEYS = ("remaining", "remainingPercent", "remaining_percent",
+                     "left", "remain", "balance")
+
+
+def fetch_mimo_usage():
+    """调用 config.json 里配置的 MiMo 用量端点，返回 dict 或 None。
+
+    返回 {"remaining": 0~100, "reset_ts": epoch 秒, "plan": 套餐名|None,
+          "monthly_remaining": 0~100|None}。未配置 / 校验失败 / 鉴权失败 /
+    结构里读不出比例，一律返回 None（虚线空环，不伪造读数）。"""
+    url, headers = _mimo_config()
+    if not url:
+        return None
+    url = _validated_mimo_url(url)
+    if not url:
+        print("MiMo 用量端点未通过校验（需 https + 公网地址）")
+        return None
+
+    try:
+        with _OPENER.open(Request(url, headers=headers), timeout=10) as resp:
+            raw = resp.read(MIMO_MAX_BYTES + 1)
+    except (URLError, OSError) as exc:
+        _gate_report("mimo", exc)
+        print(f"MiMo 用量错误: {exc}")
+        return None
+    if len(raw) > MIMO_MAX_BYTES:
+        print("MiMo 用量响应超过大小上限，已丢弃")
+        return None
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        print(f"MiMo 用量响应不是 JSON: {exc}")
+        return None
+    _gate_reset("mimo")
+
+    remaining = _mimo_number(_mimo_find(body, _mimo_REMAIN_KEYS))
+    if remaining is None:
+        used = _mimo_number(_mimo_find(body, _MIMO_USED_KEYS))
+        if used is not None:
+            remaining = 100 - used
+    if remaining is None:
+        # 业务层失败（HTTP 200 但 code!=0 / 空 data）要留痕，否则日志一片空白
+        print(f"MiMo 用量接口无额度数据: {str(body)[:150]}")
+        return None
+    remaining = max(0.0, min(100.0, remaining))
+
+    plan = _mimo_find(body, ("plan", "planName", "plan_name", "title",
+                             "subscription", "packageName"))
+    if not isinstance(plan, str) or not plan.strip():
+        plan = None
+    monthly = _mimo_number(_mimo_find(
+        body, ("monthly", "monthlyRemaining", "monthly_remaining",
+               "monthRemaining", "month_remaining", "monthPercent")))
+    return {
+        "remaining": remaining,
+        "reset_ts": _mimo_reset_ts(_mimo_find(
+            body, ("reset_ts", "resetAt", "reset_at", "resetDate",
+                   "reset_date", "nextResetTime", "next_reset_time",
+                   "expires_at", "expire_at", "expireAt"))),
+        "plan": plan,
+        "monthly_remaining": (max(0.0, min(100.0, monthly))
+                              if monthly is not None else None),
+    }
+
+
 # ── 会话活动检测（闲忙状态）───────────────────────────────────────────
 # 借鉴 Codenotch 的会话状态可视化：各源忙闲不看 API，看本机 CLI 的会话文件
 # 写入信号——rollout / event jsonl 持续写入即「忙」，停写但进程还在即
@@ -975,10 +1171,11 @@ RAIL_RADIUS = WIDGET_W // 2
 # 槽位规格单一来源：key 列表 + 槽距推导中心 y，其余（hover 命中分界 /
 # 百分比文字顶 / 总高）全部由它推导——加槽只改这一处，不再五处同步。
 # Codex 多账号（~/.codex-<slug>）各占一槽，位置固定不互换。
+# MiMo 排在各 LLM 源之后、番茄钟之前：上段全是额度源，下段是时间源。
 SLOT_LAYOUT = (["glm", "kimi"]
                + ["codex" if not slug else f"codex:{slug}"
                   for slug, _ in CODEX_PROFILES]
-               + ["pomo"])
+               + ["mimo", "pomo"])
 
 
 def _slot_specs(keys):
@@ -1010,6 +1207,8 @@ GLM_BLUE = (18, 105, 203, 255)  # GLM 主色：深蓝
 KIMI_GREEN = (48, 209, 88, 255) # Kimi 主色：绿色
 CODEX_MAGENTA = (214, 51, 132, 255)  # Codex 主色：洋红（色相 320–335° 是全卡唯一空闲区间，避开蓝/绿/紫/teal 与告警三色）
 CODEX_DISC = (192, 38, 110, 255)      # Codex 底盘：洋红深一档
+MIMO_ORANGE = (255, 105, 0, 255)      # MiMo 主色：小米橙 #FF6900（与 iOS 告警橙 #FF9F0A 相邻但更红）
+MIMO_DISC = (214, 84, 0, 255)         # MiMo 底盘：深一档，压住与额度告警橙的相似度
 FOCUS_COLOR = (191, 90, 242, 255)   # Apple 专注紫：工作阶段
 REST_COLOR = (100, 210, 255, 255)   # teal：休息阶段
 OFF_COLOR = (142, 142, 147, 255)    # iOS systemGray：非工作时段（待机/午休/下班/假日）
@@ -1170,6 +1369,34 @@ def _draw_codex_mark(d, cx, cy, size):
            fill=(255, 255, 255, 255), width=width)
 
 
+def _draw_mimo_mark(d, cx, cy, size):
+    """MiMo 的橙色圆盘剪影：白色对话气泡 + 右上四角火花。
+
+    与 GLM 晶体 / Kimi 星芒 / Codex ❯_ / 番茄沙漏同属高对比简洁剪影——
+    12px 下可辨识优先于品牌还原：气泡是实心白块（远看轮廓唯一，不会与
+    星芒的尖角混淆），火花压在右上角补足「AI 助手」语义，两块之间留出
+    约 0.3×半径的缺口，缩图后仍读得出是两个元素。"""
+    h = size / 2
+    white = (255, 255, 255, 255)
+    # 气泡：偏左下的圆角矩形，尾巴又宽又短——缩到 12px 后「细长尖尾」
+    # 会读成一面旗而不是对话气泡，宽尾才是这个尺寸下的稳定轮廓
+    bl, bt = cx - h * 0.92, cy - h * 0.58
+    br, bb = cx + h * 0.10, cy + h * 0.28
+    d.rounded_rectangle([bl, bt, br, bb], radius=h * 0.28, fill=white)
+    d.polygon([(cx - h * 0.72, bb - h * 0.12),
+               (cx - h * 0.84, bb + h * 0.46),
+               (cx - h * 0.06, bb - h * 0.12)], fill=white)
+    # 火花：四角星（外尖锐、内收腰），落在右上缺口之外
+    sx, sy = cx + h * 0.78, cy - h * 0.62
+    ro, ri = h * 0.36, h * 0.11
+    points = []
+    for i in range(8):
+        angle = math.radians(-90 + i * 45)
+        r = ro if i % 2 == 0 else ri
+        points.append((sx + math.cos(angle) * r, sy + math.sin(angle) * r))
+    d.polygon(points, fill=white)
+
+
 def _draw_pomodoro_mark(d, cx, cy, size, color):
     """番茄阶段使用简洁沙漏，工作/休息/非工作只变色，不改变图形语义。"""
     half_w, half_h = size * 0.32, size * 0.44
@@ -1235,11 +1462,12 @@ def _draw_activity_overlay(img, cx, cy, radius, state, now):
 
 def create_widget_image(values, pomo, dim, activity=None, glass=False,
                         slots=None):
-    """生成窄幅状态轨：GLM、Kimi、Codex（可多账号）与番茄阶段图标圆环。
+    """生成窄幅状态轨：GLM、Kimi、Codex（可多账号）、MiMo 与番茄阶段图标圆环。
 
-    主轨只呈现各源最关键的一格读数（GLM/Kimi 短期额度、Codex 周预算、当前
-    番茄阶段）；重置、周/月额度和精确读数保留在 hover 详情面板中。每个图标
-    下方显示对应剩余比例。activity 给出各额度源的会话闲忙态叠加。
+    主轨只呈现各源最关键的一格读数（GLM/Kimi 短期额度、Codex 周预算、
+    MiMo 套餐剩余、当前番茄阶段）；重置、周/月额度和精确读数保留在 hover
+    详情面板中。每个图标下方显示对应剩余比例。activity 给出各额度源的
+    会话闲忙态叠加。
     slots 为当前可见槽位（默认全量）：被判无响应的源由调用方整体摘掉，
     轨道高度随可见槽数收缩。"""
     keys = tuple(slots) if slots is not None else SLOT_KEYS
@@ -1289,13 +1517,15 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False,
             ring_color, disc_color = GLM_BLUE, GLM_BLUE
         elif key == "kimi":
             ring_color, disc_color = KIMI_GREEN, KIMI_GREEN
+        elif key == "mimo":
+            ring_color, disc_color = MIMO_ORANGE, MIMO_DISC
         else:  # codex 及各 slug 账号
             ring_color, disc_color = CODEX_MAGENTA, CODEX_DISC
         _draw_ring(d, img, cx, cy, radius, stroke,
                    0 if remaining is None else remaining / 100,
                    ring_color, no_data=remaining is None)
         if remaining is None:
-            if key != "glm":  # GLM 加载态默认满电，无数据横线只用于 Kimi/Codex
+            if key != "glm":  # GLM 加载态默认满电，无数据横线只用于其余源
                 draw_no_data_dash(cy)
             else:
                 _draw_icon_disc(d, cx, cy, glyph_size * 0.75, disc_color)
@@ -1306,6 +1536,8 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False,
                 _draw_glm_mark(d, cx, cy, glyph_size)
             elif key == "kimi":
                 _draw_kimi_mark(d, cx, cy, glyph_size)
+            elif key == "mimo":
+                _draw_mimo_mark(d, cx, cy, glyph_size)
             else:
                 _draw_codex_mark(d, cx, cy, glyph_size)
         _draw_quota_badge(d, cx, cy, radius, remaining)
@@ -1399,6 +1631,16 @@ def create_detail_image(info, target, glass=False):
             reset = f"{days}天{rem // 3600}h"
         line_two = (f"{reset} · 今日 ${today:.1f}"
                     if today is not None else reset)
+    elif target == "mimo":
+        value = info["mimo_remaining"]
+        title, accent = "MiMo 用量", MIMO_ORANGE
+        monthly = info["mimo_monthly"]
+        if monthly is not None:
+            line_one = f"月额度 {monthly:.0f}%"
+        else:  # 没有长周期额度就把套餐名放这行，端点没给则如实写「套餐 --」
+            line_one = f"套餐 {info['mimo_plan'] or '--'}"
+        line_two = reset_text(info["mimo_reset_ts"])
+        meta_x = 84
     else:
         value = info["pomo_progress"] * 100
         title, accent = "番茄阶段", _stage_color(info["pomo_stage"])
@@ -1685,6 +1927,12 @@ class GLMWidget:
                 "monthly": c.get("monthly"),
                 "unrestricted": bool(c.get("unrestricted", False)),
             }
+        mimo_saved = saved.get("mimo") or {}
+        self._mimo_remaining = mimo_saved.get("remaining")
+        self._mimo_reset_ts = (mimo_saved.get("reset_ts", 0)
+                               if mimo_saved.get("reset_ts", 0) > now else 0.0)
+        self._mimo_monthly_remaining = mimo_saved.get("monthly")
+        self._mimo_plan = mimo_saved.get("plan")
         self._pomo = _pomo_state()
         self._dim = 0.0           # 番茄钟闪烁调光系数 0~1（正弦淡出）
         self._blinking = False
@@ -1835,6 +2083,12 @@ class GLMWidget:
                         "unrestricted": c["unrestricted"],
                     }
                     for slug, c in self._codex.items()
+                },
+                "mimo": {
+                    "remaining": self._mimo_remaining,
+                    "reset_ts": self._mimo_reset_ts,
+                    "monthly": self._mimo_monthly_remaining,
+                    "plan": self._mimo_plan,
                 },
             },
         }
@@ -2254,6 +2508,10 @@ class GLMWidget:
             "codex_weekly_limit": (codex.get("weekly") or (0.0, 0.0))[1],
             "codex_reset_ts": codex.get("reset_ts", 0),
             "codex_today_cost": codex.get("today_cost"),
+            "mimo_remaining": self._mimo_remaining,
+            "mimo_reset_ts": self._mimo_reset_ts,
+            "mimo_monthly": self._mimo_monthly_remaining,
+            "mimo_plan": self._mimo_plan,
             "pomo_label": p["label"],
             "pomo_detail": detail,
             "pomo_progress": p["progress"],
@@ -2278,6 +2536,8 @@ class GLMWidget:
             "glm": disp.get("glm", self._token_remaining),
             "kimi": (disp.get("kimi", self._kimi_remaining)
                      if self._kimi_remaining is not None else None),
+            "mimo": (disp.get("mimo", self._mimo_remaining)
+                     if self._mimo_remaining is not None else None),
         }
         for slug, c in self._codex.items():
             key = "codex" if not slug else f"codex:{slug}"
@@ -2342,6 +2602,21 @@ class GLMWidget:
                 parts.append(f"{name} 今日已用: ${c['today_cost']:.2f}{daily}")
             if c["monthly"] is not None:
                 parts.append(f"{name} 月额度剩余: {c['monthly']:.0f}%")
+        if "mimo" in self._dead:
+            parts.append("MiMo: 无响应，图标已暂时摘除（恢复后自动回归）")
+        elif self._mimo_remaining is None:
+            parts.append("MiMo: 无数据（config.json 未配 mimo 段 / 端点不可达）")
+        else:
+            mp = f"MiMo 套餐剩余: {self._mimo_remaining:.0f}%"
+            if self._mimo_plan:
+                mp += f"（{self._mimo_plan}）"
+            if self._mimo_reset_ts:
+                left = max(0, self._mimo_reset_ts - time.time())
+                h, rem = divmod(int(left), 3600)
+                mp += f"（{h}h{rem // 60:02d}m 后重置）"
+            parts.append(mp)
+            if self._mimo_monthly_remaining is not None:
+                parts.append(f"MiMo 月额度剩余: {self._mimo_monthly_remaining:.0f}%")
         parts.append(f"番茄钟 {detail}")
         self.root.tooltip_text = " | ".join(parts)
         if self._panel_visible:
@@ -2447,6 +2722,7 @@ class GLMWidget:
         """全源刷新：各自独立线程拉取（任一源超时不拖累其余源 UI 更新）。"""
         self._refresh_source("glm", schedule=False)
         self._refresh_source("kimi", schedule=False)
+        self._refresh_source("mimo", schedule=False)
         for slug, home in CODEX_PROFILES:
             self._refresh_source(self._codex_key(slug), schedule=False)
         self._schedule()
@@ -2458,6 +2734,8 @@ class GLMWidget:
             self._spawn_fetch("glm", fetch_usage, self._apply_glm_usage)
         elif key == "kimi":
             self._spawn_fetch("kimi", fetch_kimi_usage, self._apply_kimi_usage)
+        elif key == "mimo":
+            self._spawn_fetch("mimo", fetch_mimo_usage, self._apply_mimo_usage)
         elif key and key.startswith("codex"):
             slug = key.split(":", 1)[1] if ":" in key else ""
             home = dict(CODEX_PROFILES).get(slug)
@@ -2529,6 +2807,21 @@ class GLMWidget:
                 self._kimi_monthly_remaining = min(
                     max(100 - monthly_pct, 0), 100)
             self._check_alert("kimi", "Kimi 短期", self._kimi_remaining)
+            self._save_state(throttle=True)
+        self._render()
+
+    def _apply_mimo_usage(self, mimo):
+        """UI 线程应用 MiMo 抓取结果；端点未配置 / 不可达时保持既有读数，
+        从未有过数据则保持 None（虚线空环，不伪造读数）。"""
+        self._last_refresh = datetime.now().strftime("%H:%M:%S")
+        self._note_fetch_result("mimo", bool(mimo))
+        if mimo:
+            self._mimo_remaining = mimo["remaining"]
+            self._set_targets(mimo=self._mimo_remaining)
+            self._mimo_reset_ts = mimo["reset_ts"]
+            self._mimo_monthly_remaining = mimo["monthly_remaining"]
+            self._mimo_plan = mimo["plan"]
+            self._check_alert("mimo", "MiMo 套餐", self._mimo_remaining)
             self._save_state(throttle=True)
         self._render()
 

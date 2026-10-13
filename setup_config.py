@@ -22,8 +22,18 @@ if not base_url or not token:
     print("请先在 ZCode 中配置 GLM API key，或手动编辑 config.json 填入 base_url 与 token。")
     raise SystemExit(1)
 
+# 先读回既有 config.json，只覆盖 base_url / token 两个字段——config.json 里
+# 使用者手工加的其它段（如 MiMo 用量端点 mimo）不能被重跑本脚本抹掉
+try:
+    existing = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    if not isinstance(existing, dict):
+        existing = {}
+except (OSError, json.JSONDecodeError):
+    existing = {}
+existing.update({"base_url": base_url, "token": token})
+
 CONFIG_PATH.write_text(
-    json.dumps({"base_url": base_url, "token": token}, indent=2, ensure_ascii=False),
+    json.dumps(existing, indent=2, ensure_ascii=False),
     encoding="utf-8",
 )
 print(f"已写入 {CONFIG_PATH}")
