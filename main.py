@@ -1954,9 +1954,11 @@ def create_detail_image(info, target, glass=False):
         # 详情卡右列只有 ~74px，文案一律用短式；完整口径（含「不含缓存读」）
         # 放在主卡 tooltip 里
         used_text = None if used is None else f"已用 {_fmt_tokens(used)}"
-        # 预算 / 套餐名优先于月额度：月额度和大数字是同一个百分比，放这行只是
-        # 重复；预算（11.0B）才是分母本身，信息量更大
-        if budget:
+        # 配了远端端点却回落到基线 = 官方接口没通（401 = 会话过期），第一行直接
+        # 报出来，别让使用者以为还是真值——这一行原本放的是「预算 11.0B」
+        if info.get("mimo_fallback"):
+            line_one = "cookie 过期"
+        elif budget:
             line_one = f"预算 {_fmt_tokens(budget)}"
         elif info["mimo_plan"]:
             line_one = info["mimo_plan"]
@@ -2858,6 +2860,9 @@ class GLMWidget:
             "mimo_plan": self._mimo_plan,
             "mimo_used": self._mimo_used_tokens,
             "mimo_budget": self._mimo_budget,
+            # 配了远端端点却走了基线兜底 = 官方接口没通（多为会话 cookie 过期）
+            "mimo_fallback": (bool(_mimo_config()[0])
+                              and self._mimo_baseline_used is not None),
             "pomo_label": p["label"],
             "pomo_detail": detail,
             "pomo_progress": p["progress"],

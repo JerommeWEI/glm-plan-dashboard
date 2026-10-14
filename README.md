@@ -1,4 +1,4 @@
-# GLM Plan Dashboard v1.43
+# GLM Plan Dashboard v1.44
 
 GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏四个图标圆环分别显示短期/套餐额度、Codex 周预算和当前番茄阶段剩余，图标下方显示百分比（**GLM 源 v1.40 起暂时停用**，见 `DISABLED_SOURCES`，删掉那个元组里的 `"glm"` 即可恢复）。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
 
@@ -97,6 +97,9 @@ C:\Windows\explorer.exe "E:\GIT_Space\glm-plan-dashboard\launch-dashboard.vbs"
 在沙盒里直接 `wscript launch-dashboard.vbs`、`pythonw main.py` 或 `schtasks` 均不可行（前两者被 Job 连坐回收，后者被沙盒拦截）。进程在跑但看不到悬浮窗时，先检查它是否缩成了屏缘 6px 细条（鼠标触及该侧屏缘即滑出），位置记忆在 `ui_state.json`。
 
 ## 更新日志
+
+### v1.44
+- **兜底态在界面上自证**：配了官方端点却回落到「基线 + 本机账本」时，hover 详情卡第一行直接写 **`cookie 过期`**（替代「预算 11.0B」），一眼看出当前不是官方真值。判据不加新状态——远端成功时 `baseline_used` 为空、失败回落才带上基线值，`配了 url 且 baseline_used 非空` 即可判定。顺带发现 `root.tooltip_text` 只写不读（v1.x 一直没渲染），所以提示必须放在看得见的详情卡上
 
 ### v1.43
 - **接通官方用量接口（决定性一步）**：`GET platform.xiaomimimo.com/api/v1/tokenPlan/usage` + 平台会话 cookie（`api-platform_serviceToken` 等，`config.json` 的 `mimo.token` + `auth: cookie`）。此前试过的 `tp-` key、`sk-` key、`mimo-server-cn/api/user/usage` 全部不通——平台 key 只授权 `/v1/models` 与对话，账号级接口只认小米会话；而**平台控制台自己的 `/api/v1/*` 认 `api-platform_*` cookie**
