@@ -1,10 +1,11 @@
-"""GLM + Kimi + Codex + MiMo 用量悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨贴靠屏幕左/右缘
+"""GLM + Kimi + Codex + MiMo 悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨贴靠屏幕左/右缘
 
-Win11 Acrylic 真毛玻璃状态轨：GLM 深蓝几何晶体、Kimi 绿色星芒、Codex 洋红
-终端符、MiMo 橙色气泡火花、番茄沙漏五个图标槽位的圆环分别表示三源额度、
-Codex 周预算、MiMo 套餐剩余和当前番茄阶段剩余。拖到任意屏松手就近贴边
-（左/右缘皆可，跨屏生效），悬停从停靠侧对缘展开详情面板，空闲时自动缩成
-停靠侧 6px 水位式番茄进度条（满格齐顶、随剩余时间自上而下回落）。
+Win11 Acrylic 真毛玻璃状态轨：Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色
+气泡火花、番茄沙漏四个图标槽位的圆环分别表示短期额度、Codex 周预算、
+MiMo 会话活跃（v1.45 起**不显示用量**，只做呼吸灯指示）和当前番茄阶段剩余。
+拖到任意屏松手就近贴边（左/右缘皆可，跨屏生效），悬停从停靠侧对缘展开
+详情面板，空闲时自动缩成停靠侧 6px 水位式番茄进度条（满格齐顶、随剩余
+时间自上而下回落）。
 """
 
 import ctypes
@@ -65,10 +66,6 @@ sys.stderr = _Tee(sys.stderr, _log_file)
 
 REFRESH_INTERVAL = 300      # 有会话活跃时的刷新间隔：5 分钟
 IDLE_REFRESH_INTERVAL = 600  # 全部源空闲（无会话活动）时降频到 10 分钟
-# MiMo 本机账本的独立快刷间隔：读的是本机 sqlite（约 600 行、毫秒级），
-# 没有网络也没有配额成本，没必要跟着 5 分钟的全源周期走——已用量要能
-# 跟着会话实时往下走。配了远端端点就退回全源周期，不空发网络请求。
-MIMO_FAST_INTERVAL = 10
 BACKOFF_BASE = 60           # 429 退避起步秒数，连续触发翻倍
 BACKOFF_CAP = 900           # 退避上限 15 分钟
 DEAD_AFTER = 3              # 连续多少次抓取无响应 → 摘掉该源图标（成功一次即恢复）
@@ -1770,8 +1767,9 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False,
     """生成窄幅状态轨：GLM、Kimi、Codex（可多账号）、MiMo 与番茄阶段图标圆环。
 
     主轨只呈现各源最关键的一格读数（GLM/Kimi 短期额度、Codex 周预算、
-    MiMo 套餐剩余、当前番茄阶段）；重置、周/月额度和精确读数保留在 hover
-    详情面板中。每个图标下方显示对应剩余比例。activity 给出各额度源的
+    当前番茄阶段）；重置、周/月额度和精确读数保留在 hover 详情面板中。
+    **MiMo 槽是例外（v1.45）**：不显示任何用量，只画图标 + 暗色轨道 +
+    柔光呼吸灯（会话闲忙指示）。activity 给出各额度源的
     会话闲忙态叠加。
     slots 为当前可见槽位（默认全量）：被判无响应的源由调用方整体摘掉，
     轨道高度随可见槽数收缩。"""
@@ -1793,17 +1791,10 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False,
     now = time.time()
     pct_font = _load_font(NUM_FONT, 11 * s)
 
-    def draw_percentage(y, value, decimals=0):
-        """环下的剩余百分比。decimals=1 用于 MiMo（token 套餐十亿级，整数
-        百分比 20 小时才挪 1%，一位小数才有变化可看）；宽度超过胶囊内侧就
-        退回整数——`100.0%` 六个字符在 44px 轨上会压到边缘。"""
-        text = ("--" if value is None
-                else f"{max(0, min(100, value)):.{decimals}f}%")
+    def draw_percentage(y, value):
+        text = "--" if value is None else f"{max(0, min(100, value)):.0f}%"
         color = TEXT_DIM if value is None else TEXT_SUB
         bbox = d.textbbox((0, 0), text, font=pct_font)
-        if decimals and value is not None and bbox[2] - bbox[0] > (WIDGET_W - 4) * s:
-            text = f"{max(0, min(100, value)):.0f}%"
-            bbox = d.textbbox((0, 0), text, font=pct_font)
         d.text((cx - (bbox[2] - bbox[0]) / 2 - bbox[0], y * s - bbox[1]),
                text, font=pct_font, fill=color)
 
@@ -1813,6 +1804,15 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False,
 
     for i, key in enumerate(keys):
         cy = specs[i][1] * s
+        if key == "mimo":
+            # v1.45：MiMo 槽只做**会话活跃指示**，不显示任何用量——橙盘 + 图标
+            # + 柔光呼吸灯（忙=白色呼吸、等你输入=琥珀脉冲），环只画暗色轨道
+            # 不画额度弧，环下不写百分比、也不弹额度小点
+            _draw_ring(d, img, cx, cy, radius, stroke, 0.0, MIMO_ORANGE)
+            _draw_icon_disc(d, cx, cy, glyph_size * 0.75, MIMO_DISC)
+            _draw_mimo_mark(d, cx, cy, glyph_size)
+            _draw_activity_overlay(img, cx, cy, radius, activity.get(key), now)
+            continue
         if key == "pomo":
             stage_color = _stage_color(pomo["stage"])
             if dim:
@@ -1829,8 +1829,6 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False,
             ring_color, disc_color = GLM_BLUE, GLM_BLUE
         elif key == "kimi":
             ring_color, disc_color = KIMI_GREEN, KIMI_GREEN
-        elif key == "mimo":
-            ring_color, disc_color = MIMO_ORANGE, MIMO_DISC
         else:  # codex 及各 slug 账号
             ring_color, disc_color = CODEX_MAGENTA, CODEX_DISC
         _draw_ring(d, img, cx, cy, radius, stroke,
@@ -1848,15 +1846,11 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False,
                 _draw_glm_mark(d, cx, cy, glyph_size)
             elif key == "kimi":
                 _draw_kimi_mark(d, cx, cy, glyph_size)
-            elif key == "mimo":
-                _draw_mimo_mark(d, cx, cy, glyph_size)
             else:
                 _draw_codex_mark(d, cx, cy, glyph_size)
         _draw_quota_badge(d, cx, cy, radius, remaining)
         _draw_activity_overlay(img, cx, cy, radius, activity.get(key), now)
-        # MiMo 是十亿级 token 套餐，整数百分比几乎不动，显示一位小数
-        draw_percentage(specs[i][1] + 19, remaining,
-                        decimals=1 if key == "mimo" else 0)
+        draw_percentage(specs[i][1] + 19, remaining)
 
     return img.resize((WIDGET_W, height), Image.LANCZOS)
 
@@ -1946,34 +1940,12 @@ def create_detail_image(info, target, glass=False):
         line_two = (f"{reset} · 今日 ${today:.1f}"
                     if today is not None else reset)
     elif target == "mimo":
-        value = info["mimo_remaining"]
-        title, accent = "MiMo 用量", MIMO_ORANGE
-        monthly = info["mimo_monthly"]
-        used = info.get("mimo_used")
-        budget = info.get("mimo_budget")
-        # 详情卡右列只有 ~74px，文案一律用短式；完整口径（含「不含缓存读」）
-        # 放在主卡 tooltip 里
-        used_text = None if used is None else f"已用 {_fmt_tokens(used)}"
-        # 配了远端端点却回落到基线 = 官方接口没通（401 = 会话过期），第一行直接
-        # 报出来，别让使用者以为还是真值——这一行原本放的是「预算 11.0B」
-        if info.get("mimo_fallback"):
-            line_one = "cookie 过期"
-        elif budget:
-            line_one = f"预算 {_fmt_tokens(budget)}"
-        elif info["mimo_plan"]:
-            line_one = info["mimo_plan"]
-        elif monthly is not None:
-            line_one = f"月额度 {monthly:.0f}%"
-        else:
-            line_one = used_text or "套餐 --"
-        if info["mimo_reset_ts"]:
-            line_two = reset_text(info["mimo_reset_ts"])
-        elif used_text and line_one != used_text:
-            line_two = used_text
-        elif used_text:
-            line_two = "未配预算"     # 已用量占了第一行，如实说明环为什么不画
-        else:
-            line_two = "等待同步"
+        # v1.45：MiMo 不显示任何用量，详情卡只报会话状态（与呼吸灯同一语义）
+        state = info.get("mimo_activity")
+        value = {"busy": "忙", "blocked": "等待", "idle": "空闲"}.get(state, "未接")
+        title, accent = "MiMo 会话", MIMO_ORANGE
+        line_one = "不显示用量"
+        line_two = "呼吸灯随会话"
         meta_x = 84
     else:
         value = info["pomo_progress"] * 100
@@ -1983,15 +1955,18 @@ def create_detail_image(info, target, glass=False):
         meta_x = 84
 
     title_font = _load_font(ZH_FONT, 10 * s, ZH_WEIGHT)
-    value_font = _load_font(NUM_FONT, 22 * s)
+    # value 可能是剩余百分比（数字，Segoe 等宽步进），也可能是 MiMo 的会话
+    # 状态词（中文，必须换中文字体——Segoe 没有 CJK 字形，会画成空白）
+    if isinstance(value, str):
+        value_font = _load_font(ZH_FONT, 22 * s, ZH_WEIGHT)
+        value_text = value
+    elif value is None:
+        value_font = _load_font(NUM_FONT, 22 * s)
+        value_text = "--"
+    else:
+        value_font = _load_font(NUM_FONT, 22 * s)
+        value_text = f"{max(0, min(100, value)):.0f}%"
     meta_font = _load_font(ZH_FONT, 9 * s, ZH_WEIGHT)
-    # MiMo 的大数字与轨上一致带一位小数；宽度顶到 meta 列就退回整数
-    decimals = 1 if target == "mimo" else 0
-    value_text = ("--" if value is None
-                  else f"{max(0, min(100, value)):.{decimals}f}%")
-    if decimals and value is not None:
-        if d.textbbox((0, 0), value_text, font=value_font)[2] > (meta_x - 14) * s:
-            value_text = f"{max(0, min(100, value)):.0f}%"
     d.text((12 * s, 8 * s), title, font=title_font, fill=TEXT_SUB)
     d.text((12 * s, 25 * s), value_text, font=value_font,
            fill=TEXT_DIM if value is None else accent)
@@ -2854,15 +2829,8 @@ class GLMWidget:
             "codex_weekly_limit": (codex.get("weekly") or (0.0, 0.0))[1],
             "codex_reset_ts": codex.get("reset_ts", 0),
             "codex_today_cost": codex.get("today_cost"),
-            "mimo_remaining": self._mimo_remaining,
-            "mimo_reset_ts": self._mimo_reset_ts,
-            "mimo_monthly": self._mimo_monthly_remaining,
-            "mimo_plan": self._mimo_plan,
-            "mimo_used": self._mimo_used_tokens,
-            "mimo_budget": self._mimo_budget,
-            # 配了远端端点却走了基线兜底 = 官方接口没通（多为会话 cookie 过期）
-            "mimo_fallback": (bool(_mimo_config()[0])
-                              and self._mimo_baseline_used is not None),
+            # v1.45：MiMo 不显示用量，详情卡只报会话状态（与呼吸灯同一语义）
+            "mimo_activity": self._activity.get("mimo"),
             "pomo_label": p["label"],
             "pomo_detail": detail,
             "pomo_progress": p["progress"],
@@ -2887,8 +2855,6 @@ class GLMWidget:
             "glm": disp.get("glm", self._token_remaining),
             "kimi": (disp.get("kimi", self._kimi_remaining)
                      if self._kimi_remaining is not None else None),
-            "mimo": (disp.get("mimo", self._mimo_remaining)
-                     if self._mimo_remaining is not None else None),
         }
         for slug, c in self._codex.items():
             key = "codex" if not slug else f"codex:{slug}"
@@ -2954,35 +2920,11 @@ class GLMWidget:
                 parts.append(f"{name} 今日已用: ${c['today_cost']:.2f}{daily}")
             if c["monthly"] is not None:
                 parts.append(f"{name} 月额度剩余: {c['monthly']:.0f}%")
-        if "mimo" in self._dead:
-            parts.append("MiMo: 无响应，图标已暂时摘除（恢复后自动回归）")
-        elif self._mimo_remaining is None and self._mimo_used_tokens is None:
-            parts.append("MiMo: 无数据（本机无账本记录 / 远端端点不可达）")
-        else:
-            mp = ("MiMo 套餐剩余: "
-                  + ("--" if self._mimo_remaining is None
-                     else f"{self._mimo_remaining:.0f}%"))
-            if self._mimo_budget:
-                mp += f"（预算 {_fmt_tokens(self._mimo_budget)}）"
-            if self._mimo_plan:
-                mp += f"（{self._mimo_plan}）"
-            if self._mimo_reset_ts:
-                left = max(0, self._mimo_reset_ts - time.time())
-                h, rem = divmod(int(left), 3600)
-                mp += f"（{h}h{rem // 60:02d}m 后重置）"
-            parts.append(mp)
-            if self._mimo_used_tokens is not None:
-                if self._mimo_baseline_used is not None:
-                    parts.append(
-                        f"MiMo 套餐已用: {_fmt_tokens(self._mimo_used_tokens)}"
-                        f" tokens（官网基线 {_fmt_tokens(self._mimo_baseline_used)}"
-                        " + 本机增量，其他设备在基线后的消耗未计入）")
-                else:
-                    parts.append(
-                        f"MiMo 本机本月已用: {_fmt_tokens(self._mimo_used_tokens)}"
-                        " tokens（含缓存读，未套官网基线）")
-            if self._mimo_monthly_remaining is not None:
-                parts.append(f"MiMo 月额度剩余: {self._mimo_monthly_remaining:.0f}%")
+        # v1.45：MiMo 不显示用量，tooltip 只报会话状态
+        _mimo_states = {"busy": "忙", "blocked": "等待输入", "idle": "空闲"}
+        parts.append("MiMo: 会话"
+                     + _mimo_states.get(self._activity.get("mimo"), "未接")
+                     + "（不显示用量，只看呼吸灯）")
         parts.append(f"番茄钟 {detail}")
         self.root.tooltip_text = " | ".join(parts)
         if self._panel_visible:
@@ -3085,8 +3027,9 @@ class GLMWidget:
         threading.Thread(target=run, daemon=True).start()
 
     def _do_refresh(self):
-        """全源刷新：各自独立线程拉取（任一源超时不拖累其余源 UI 更新）。"""
-        for key in ("glm", "kimi", "mimo"):
+        """全源刷新：各自独立线程拉取（任一源超时不拖累其余源 UI 更新）。
+        MiMo 不抓用量（v1.45 只做会话指示），所以不进这条链。"""
+        for key in ("glm", "kimi"):
             if key not in DISABLED_SOURCES:
                 self._refresh_source(key, schedule=False)
         for slug, home in CODEX_PROFILES:
@@ -3095,13 +3038,12 @@ class GLMWidget:
 
     def _refresh_source(self, key, schedule=True):
         """点击槽位刷新对应源（借鉴 Codenotch 点环重拉该 provider）。
-        pomo 槽无远程数据源，仅重绘。"""
+        pomo / mimo 槽无远程数据源，仅重绘（mimo 的会话闲忙由 2 秒活动
+        扫描线程驱动，不需要刷新）。"""
         if key == "glm":
             self._spawn_fetch("glm", fetch_usage, self._apply_glm_usage)
         elif key == "kimi":
             self._spawn_fetch("kimi", fetch_kimi_usage, self._apply_kimi_usage)
-        elif key == "mimo":
-            self._spawn_fetch("mimo", fetch_mimo_usage, self._apply_mimo_usage)
         elif key and key.startswith("codex"):
             slug = key.split(":", 1)[1] if ":" in key else ""
             home = dict(CODEX_PROFILES).get(slug)
@@ -3111,7 +3053,7 @@ class GLMWidget:
                 key,
                 lambda: fetch_codex_usage(home, key),
                 lambda result, s=slug: self._apply_codex_usage(result, s))
-        elif key == "pomo":
+        elif key in ("pomo", "mimo"):
             self._render()
         else:
             return
@@ -3220,19 +3162,6 @@ class GLMWidget:
             self._check_alert(self._codex_key(slug), name, c["remaining"])
             self._save_state(throttle=True)
         self._render()
-
-    def _mimo_fast_tick(self):
-        """MiMo 本机账本快刷（自愈守护，同 _poll_hover）：每
-        MIMO_FAST_INTERVAL 秒读一次，让已用量跟着会话往下走，不再等 5 分钟
-        的全源周期。只在**本机账本模式**下快刷——配了远端端点就交回全源
-        周期，不空发网络请求。schedule=False：这条链不并入全局刷新链。"""
-        try:
-            if _mimo_config()[0] is None:
-                self._refresh_source("mimo", schedule=False)
-        except Exception:
-            traceback.print_exc()
-        finally:
-            self.root.after(MIMO_FAST_INTERVAL * 1000, self._mimo_fast_tick)
 
     def _schedule(self):
         """调度下一轮全源刷新：有会话活跃（busy/blocked）按 5 分钟，
@@ -3461,8 +3390,6 @@ class GLMWidget:
         self.root.after(500, self._do_refresh)    # Token 刷新
         self.root.after(1000, self._pomo_tick)    # 番茄钟启动
         self.root.after(150, self._poll_hover)    # 贴边隐藏 / 详情面板轮询
-        self.root.after(MIMO_FAST_INTERVAL * 1000,
-                        self._mimo_fast_tick)     # MiMo 本机账本 10s 快刷
         threading.Thread(target=self._activity_loop, daemon=True).start()  # 会话闲忙扫描
         self.root.mainloop()
 

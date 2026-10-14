@@ -1,6 +1,6 @@
-# GLM Plan Dashboard v1.44
+# GLM Plan Dashboard v1.45
 
-GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏四个图标圆环分别显示短期/套餐额度、Codex 周预算和当前番茄阶段剩余，图标下方显示百分比（**GLM 源 v1.40 起暂时停用**，见 `DISABLED_SOURCES`，删掉那个元组里的 `"glm"` 即可恢复）。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
+GLM + Kimi + Codex + MiMo 四源悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏四个图标圆环分别显示短期额度、Codex 周预算、**MiMo 会话活跃（只做呼吸灯，v1.45 起不显示用量）**和当前番茄阶段剩余，图标下方显示百分比（MiMo 槽无百分比）。GLM 源 v1.40 起暂时停用，见 `DISABLED_SOURCES`，删掉那个元组里的 `"glm"` 即可恢复。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
 
 ## 预览
 
@@ -20,7 +20,7 @@ GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深
 - **hover 详情面板**：悬停单个图标 0.3 秒，在其靠屏内一侧展开 168×64 的局部详情卡片；切换图标只更新对应项，离开轨道和卡片 0.3 秒后收起
 
 **状态轨（v1.28 · v1.35 扩至五槽 · v1.40 GLM 暂停用 → 四槽）**
-- 44px 宽的完整胶囊内固定圆环：Kimi 5h 短期额度（绿色星芒）、Codex 周预算（洋红终端符）、MiMo 套餐剩余（橙色气泡火花）、当前番茄阶段剩余（工作紫 / 休息 teal / 非工作灰）。每枚图标下方显示对应剩余百分比，图标和位置保持固定，便于形成空间记忆。**GLM 深蓝晶体槽当前停用**：`main.py` 的 `DISABLED_SOURCES = ("glm",)` 一并关掉槽位、周期刷新与闲忙通知（与「故障摘牌」不同——摘牌仍会周期探测并可能复活刷日志，停用是彻底不碰），fetch / 图标 / 详情卡 / 告警代码全部保留，删掉元组里的 `"glm"` 即恢复
+- 44px 宽的完整胶囊内固定圆环：Kimi 5h 短期额度（绿色星芒）、Codex 周预算（洋红终端符）、**MiMo 会话活跃**（橙色气泡火花，只做呼吸灯、不显示用量）、当前番茄阶段剩余（工作紫 / 休息 teal / 非工作灰）。前三者与番茄在图标下方显示对应剩余百分比，图标和位置保持固定，便于形成空间记忆。**GLM 深蓝晶体槽当前停用**：`main.py` 的 `DISABLED_SOURCES = ("glm",)` 一并关掉槽位、周期刷新与闲忙通知（与「故障摘牌」不同——摘牌仍会周期探测并可能复活刷日志，停用是彻底不碰），fetch / 图标 / 详情卡 / 告警代码全部保留，删掉元组里的 `"glm"` 即恢复
 - 平台主色不随额度变化，低于 40% 时用橙色小点提示，低于 15% 时用红色小点提示；精确百分比、重置时间、Kimi 月额度、Codex 周绝对值（$已用/$上限）与今日消耗、MiMo 套餐已用 token 数与预算全部保留在 hover 详情中（GLM 周额度在启用时一并显示）
 - Kimi 本地 daemon、Codex 中转、MiMo 端点不可用时显示灰色虚线占位环，真实额度耗尽仍是红色警示点；番茄非工作时段使用灰色沙漏环，不把它误报为额度耗尽。
 - 主轨只在状态变化时重绘：番茄钟每秒一帧、额度刷新后的缓动才 30fps，保留原有离屏 Pillow + Win32 分层窗口路径，无额外运行时依赖。
@@ -32,15 +32,11 @@ GLM + Kimi + Codex + MiMo 四源用量悬浮小组件 + 番茄工作闹钟，深
 - 额度为 USD 计价订阅，无 5h 窗口：环语义取**周预算剩余比例**（如 (300-17.4)/300），hover 详情给「周 $17.4/$300 · 6天9h 后预计重置 · 今日 $17.4」；`daily_limit_usd=0` 且 `mode=unrestricted` 表示无日限额，今日已用只以文字呈现、绝不折算成比例
 - 周重置时刻由 `weekly_window_start + 7 天` 推算（服务端无显式 reset 字段），窗口起点在未来或已越过推算点时显示「等待窗口」而非编造倒计时；安全策略沿用 GLM 源（https + 域名白名单 + DNS 后私网阻断 + 禁重定向 + 响应体 64KB 上限）
 
-**MiMo 用量源（v1.35 槽位 · v1.39 基线 · v1.43 接通官方接口）**
-- **主路径（v1.43）：官方平台接口** `GET https://platform.xiaomimimo.com/api/v1/tokenPlan/usage`，鉴权是平台会话 cookie（`api-platform_serviceToken` / `api-platform_slh` / `api-platform_ph` / `userId`，写进 `config.json` 的 `mimo.token` + `"auth": "cookie"`）。响应 `data.usage.items = [{name, used, limit, percent}]`，按 **`plan_*` 优先**取 `used` / `limit` 现算剩余（不信 `percent`——那是两位小数取整值）；`month_*` 项给详情卡当副行。**官方真值 10 秒一刷**，与控制台「套餐使用情况」逐位一致
-- cookie 会过期：失效后自动**回落到本机账本 + 官方基线**（v1.39 那套），tooltip 标注「官网基线 + 本机增量」，重新给一次 cookie 即恢复官方真值
-- 本机账本（兜底）：`~/.local/share/mimocode/mimocode.db`（`MIMOCODE_HOME` / `XDG_DATA_HOME`），只读打开（`mode=ro`，**可见 WAL**；`immutable=1` 会跳过 WAL 造成最多 45 分钟滞后，见 v1.42）。口径 `input+output+reasoning+cache.read+cache.write`。**已知边界：本机账本只覆盖官方口径的约 15%**（实测 181M vs 官方 1,196M，96% 的量来自 cache.read），所以它只能当下界 + 增量
-- 官方基线三件套（兜底用）：`baseline_used` / `baseline_local` / `baseline_at`——**最终已用 = 官方基线 + (本机装机以来 − 基线时刻本机值)**，起点与增量都是真值。基线之后别的设备的消耗记不进来，官网数字变了把新值发我重设
-- `budget`（月度 token 预算）：官方接口会带 `limit` 自动填，手工配的值只在远端不可用时用作分母；**没分母就保持虚线空环**，不拿猜的分母算百分比
-- 远端安全策略沿用 GLM / Codex 源：仅 https、DNS 解析后逐 IP 阻断私网/环回/链路本地/保留/组播地址、禁重定向（`_OPENER`）、响应体 64KB 上限、10s 超时、429 指数退避
-- **两种来源都拿不到数**才返回 None（虚线空环 + `--`）。**没配远端端点**时槽位一直挂着（图标常在）；**配了远端端点却拉不到**才计入无响应，连续 3 轮后整个槽位自动摘牌、配通一次即挂回
-- **闲忙信号**：会话文件取 `mimocode.db` 主库 + `-wal` 的 mtime（`_newest_mtime` 支持单个文件目标，不 walk 整棵树）；忙=整环白色呼吸灯、停写但 MiMo Desktop 进程仍在=琥珀脉冲，与其它源同一套语义（90s / 15min）。**会话结束 toast 对 MiMo 抑制**——MiMo Desktop 自己就弹「任务完成」，每轮对话再弹一条是重复；呼吸灯与刷新节奏不受影响
+**MiMo 槽（v1.35 加入 · v1.45 起只做会话指示）**
+- **不显示任何用量**：环只画暗色轨道（不画额度弧）、环下不写百分比、不弹额度小点；hover 详情卡只报会话状态（忙 / 等待 / 空闲）。橙色圆盘 + 白色「对话气泡 + 四角火花」图标固定不动
+- **唯一的动态就是呼吸灯**：会话文件取 `mimocode.db` 主库 + `-wal` 的 mtime（`_newest_mtime` 支持单个文件目标，不 walk 整棵树）；忙 = 整环白色呼吸灯（2.4s 正弦）、停写但 MiMo Desktop 进程仍在 = 琥珀脉冲，与其它源同一套语义（90s / 15min）。**会话结束 toast 对 MiMo 抑制**——MiMo Desktop 自己就弹「任务完成」，再弹是重复
+- **用量抓取已停用但代码保留**（`fetch_mimo_usage` 一整段：官方接口 + 本机账本 + 官方基线）：v1.43 曾接通官方平台接口 `GET platform.xiaomimimo.com/api/v1/tokenPlan/usage`（cookie 鉴权，与控制台逐位一致），但那份平台会话 cookie 是浏览器静默续期的短命凭证、拷出来约一天就过期，反复补 cookie 不划算。要恢复用量显示，把 `create_widget_image` / `create_detail_image` 的 mimo 分支改回读 `values["mimo"]`、并在 `_do_refresh` 里重新 `spawn_fetch(mimo)` 即可
+- `config.json` 的 `mimo` 段（`url` / `token` / `auth` / `budget` / `baseline_*`）现在**不会被读取**，留着只是为了恢复用量时少配一次；介意的话可以整段删掉
 
 **番茄工作闹钟（下段）**
 - 锚定作息表：工作日 9:00–11:30、13:30–18:00 两个时段内连续跑「45 分钟工作 ↔ 15 分钟休息」；时段尾自然截断（上午 11:00–11:30、下午 17:30–18:00 为 30 分钟收尾工作段，倒计时递减到 0 正好落在午休/下班边界）
@@ -84,7 +80,7 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 
 > **刷新兜底 key**：兜底 `config.json` 里的 key 过期后，重跑 `python setup_config.py` 即可——它会跳过已有 `config.json`，从 ZCode / 环境变量 / `~/.claude/settings.json` 读取最新配置写入（只覆盖 `base_url` / `token`，`mimo` 等手工段原样保留）。
 
-> **MiMo 用量**：走本机账本 + 官方基线（`config.json` 的 `mimo.budget` / `baseline_used` / `baseline_local` / `baseline_at`，见上方「MiMo 用量源」），零配置也有「本机本月已用」。官网数字变了把新值告诉我重设基线即可；另可选 `url`/`token` 指到远端额度端点。最迟一个刷新周期生效。
+> **MiMo 槽**：v1.45 起**不显示用量**，只做会话活跃指示（呼吸灯）。`config.json` 的 `mimo` 段现在不会被读取，留着只为恢复用量时少配一次；介意可整段删掉。
 
 **开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
@@ -97,6 +93,11 @@ C:\Windows\explorer.exe "E:\GIT_Space\glm-plan-dashboard\launch-dashboard.vbs"
 在沙盒里直接 `wscript launch-dashboard.vbs`、`pythonw main.py` 或 `schtasks` 均不可行（前两者被 Job 连坐回收，后者被沙盒拦截）。进程在跑但看不到悬浮窗时，先检查它是否缩成了屏缘 6px 细条（鼠标触及该侧屏缘即滑出），位置记忆在 `ui_state.json`。
 
 ## 更新日志
+
+### v1.45
+- **MiMo 槽改为纯会话指示**：需求方明确「不要显示用量和相关的信息，确保用的时候有呼吸灯就行」——环只画暗色轨道（不画额度弧）、环下不写百分比、不弹额度小点，hover 详情卡只报会话状态（忙 / 等待 / 空闲）。图标与呼吸灯（忙=白色 2.4s 呼吸、等你输入=琥珀脉冲）保持不变
+- **停掉 MiMo 的用量抓取**：`_do_refresh` 不再拉它、`_refresh_source("mimo")` 改为仅重绘（与 pomo 同）、删掉 10 秒快刷链。好处是不再每 10 秒打一次 401（平台会话 cookie 一天就过期）
+- **用量代码保留不删**（`fetch_mimo_usage` 一整段：官方平台接口 + 本机账本 + 官方基线），与 GLM 停用同一种「留着等要用」的做法；`config.json` 的 `mimo` 段同样不再被读取
 
 ### v1.44
 - **兜底态在界面上自证**：配了官方端点却回落到「基线 + 本机账本」时，hover 详情卡第一行直接写 **`cookie 过期`**（替代「预算 11.0B」），一眼看出当前不是官方真值。判据不加新状态——远端成功时 `baseline_used` 为空、失败回落才带上基线值，`配了 url 且 baseline_used 非空` 即可判定。顺带发现 `root.tooltip_text` 只写不读（v1.x 一直没渲染），所以提示必须放在看得见的详情卡上
