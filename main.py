@@ -1,6 +1,6 @@
-"""GLM + Kimi + Codex + MiMo 悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨贴靠屏幕左/右缘
+"""GLM + Codex + MiMo 悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨贴靠屏幕左/右缘
 
-Win11 Acrylic 真毛玻璃状态轨：Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色
+Win11 Acrylic 真毛玻璃状态轨：GLM 深蓝晶体、Codex 洋红终端符、MiMo 橙色
 气泡火花、番茄沙漏四个图标槽位的圆环分别表示短期额度、Codex 周预算、
 MiMo 会话活跃（v1.45 起**不显示用量**，只做呼吸灯指示）和当前番茄阶段剩余。
 拖到任意屏松手就近贴边（左/右缘皆可，跨屏生效），悬停从停靠侧对缘展开
@@ -450,92 +450,6 @@ def fetch_usage():
     return None
 
 
-# ── Kimi 用量（本地 daemon）────────────────────────────────────────────
-# Kimi Code CLI 常驻一个本地 HTTP 服务（kap-server）：端口动态写在
-# ~/.kimi-code/server/instances/*.json（取心跳最新），鉴权 token 在
-# ~/.kimi-code/server.token。用量端点返回 limit5h / limit7d / monthTotal，
-# 每项含 usedRatio（已用比例 0~1）与 resetAt（ISO-8601 UTC）。
-KIMI_HOME = Path.home() / ".kimi-code"
-KIMI_INSTANCES_DIR = KIMI_HOME / "server" / "instances"
-KIMI_SERVER_TOKEN = KIMI_HOME / "server.token"
-
-
-def _kimi_server_targets():
-    """枚举本地 Kimi daemon 的 (url, token)，按实例心跳新旧排序。"""
-    try:
-        token = KIMI_SERVER_TOKEN.read_text(encoding="utf-8").strip()
-    except OSError:
-        return []
-    if not token:
-        return []
-    instances = []
-    try:
-        for f in KIMI_INSTANCES_DIR.glob("*.json"):
-            try:
-                lock = json.loads(f.read_text(encoding="utf-8"))
-                instances.append(
-                    (lock.get("heartbeat_at", 0), lock.get("host", "127.0.0.1"),
-                     lock.get("port"))
-                )
-            except (json.JSONDecodeError, OSError):
-                continue
-    except OSError:
-        return []
-    targets = []
-    for _, host, port in sorted(instances, reverse=True):
-        if isinstance(port, int) and 0 < port < 65536:
-            targets.append((f"http://{host}:{port}/api/v1/oauth/usage", token))
-    return targets
-
-
-def fetch_kimi_usage():
-    """读取本地 Kimi daemon 的短期窗口用量，返回 dict 或 None。
-
-    daemon 未在跑（Kimi CLI 没启动过 / 已退出）时所有实例都连不上，
-    返回 None，界面按无数据处理（空轨道 + "--"），不伪造读数。
-    """
-    for url, token in _kimi_server_targets():
-        req = Request(url, headers={
-            "Authorization": f"Bearer {token}",
-            "Accept-Language": "en-US,en",
-        })
-        try:
-            with _OPENER.open(req, timeout=3) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except (URLError, OSError, json.JSONDecodeError) as exc:
-            _gate_report("kimi", exc)
-            continue
-        data = body.get("data") or {}
-        if data.get("kind") != "ok":
-            continue
-        _gate_reset("kimi")
-        quota = data.get("quota") or {}
-        usages = quota.get("usages") or {}
-        limit5h = usages.get("limit5h") or {}
-        used = limit5h.get("usedRatio")
-        if used is None:
-            continue
-        reset_ts = 0.0
-        reset_at = limit5h.get("resetAt")
-        if reset_at:
-            try:
-                from datetime import timezone
-                reset_ts = datetime.fromisoformat(
-                    reset_at.replace("Z", "+00:00")
-                ).astimezone(timezone.utc).timestamp()
-            except ValueError:
-                reset_ts = 0.0
-        monthly_used = (usages.get("monthTotal") or {}).get("usedRatio")
-        return {
-            "short_term_percentage": float(used) * 100,
-            "short_term_reset_ts": reset_ts,
-            "monthly_percentage": (
-                float(monthly_used) * 100 if monthly_used is not None else None
-            ),
-        }
-    return None
-
-
 # ── Codex 用量（第三方中转的 GPT 订阅）────────────────────────────────
 # Codex CLI 经 UAPI 网关中转：base_url 在 ~/.codex/config.toml 的
 # [model_providers.<model_provider>].base_url（供应商名跟顶层 model_provider 走，
@@ -737,7 +651,7 @@ def fetch_codex_usage(home=CODEX_HOME, source="codex"):
 
 
 # ── MiMo 用量（本机账本为主，远端端点可选）──────────────────────────
-# MiMo 是 token 套餐计量，不是 GLM/Kimi 那种 5h 窗口百分比，而且**没有
+# MiMo 是 token 套餐计量，不是 GLM 那种 5h 窗口百分比，而且**没有
 # 开箱即读的官方额度接口**（实测）：
 #   · Token Plan 网关 token-plan-cn.xiaomimimo.com/v1（tp- key）只有
 #     /v1/models 通，/usage /quota /subscription /dashboard/billing 等
@@ -1222,13 +1136,11 @@ def _activity_watchers():
     分钟，而 WAL 每次落库（消息、任务、记忆）都会更新 mtime。
 
     - GLM：Claude Code 走 GLM 中转，会话写在 ~/.claude/projects/**/*.jsonl
-    - Kimi：Kimi Code daemon 的会话事件流 server/events/session_*.jsonl
     - Codex：各账号目录 sessions/**/rollout-*.jsonl（slug 账号各自独立）
     - MiMo：mimocode.db 主库 + -wal（文件直取，不 walk）
     """
     watchers = {
         "glm": ([Path.home() / ".claude" / "projects"], ("claude",), (".jsonl",)),
-        "kimi": ([KIMI_HOME / "server" / "events"], ("kimi",), (".jsonl",)),
         "mimo": ([MIMOCODE_DB, MIMOCODE_DB.with_name("mimocode.db-wal")],
                  ("xiaomi mimo",), (".db", "-wal")),
     }
@@ -1522,7 +1434,7 @@ RAIL_RADIUS = WIDGET_W // 2
 # 源时把它的 key 加进这个元组即可：fetch、图标、详情卡、告警代码全都还在。
 DISABLED_SOURCES = ()
 
-_SLOT_KEYS = (["glm", "kimi"]
+_SLOT_KEYS = (["glm"]
               + ["codex" if not slug else f"codex:{slug}"
                  for slug, _ in CODEX_PROFILES]
               + ["mimo", "pomo"])
@@ -1555,7 +1467,6 @@ GREEN = (48, 209, 88, 255)      # iOS systemGreen：Token ≥40%
 ORANGE = (255, 159, 10, 255)    # iOS systemOrange：15–40%
 RED = (255, 69, 58, 255)        # iOS systemRed：<15%（数字同步染红）
 GLM_BLUE = (18, 105, 203, 255)  # GLM 主色：深蓝
-KIMI_GREEN = (48, 209, 88, 255) # Kimi 主色：绿色
 CODEX_MAGENTA = (214, 51, 132, 255)  # Codex 主色：洋红（色相 320–335° 是全卡唯一空闲区间，避开蓝/绿/紫/teal 与告警三色）
 CODEX_DISC = (192, 38, 110, 255)      # Codex 底盘：洋红深一档
 MIMO_ORANGE = (255, 105, 0, 255)      # MiMo 主色：小米橙 #FF6900（与 iOS 告警橙 #FF9F0A 相邻但更红）
@@ -1693,24 +1604,11 @@ def _draw_glm_mark(d, cx, cy, size):
            fill=(147, 199, 250, 255), width=max(1, width - 1))
 
 
-def _draw_kimi_mark(d, cx, cy, size):
-    """Kimi 的绿色星芒标记：固定八角，远看仍有清晰轮廓。"""
-    points = []
-    for i in range(16):
-        angle = math.radians(-90 + i * 22.5)
-        radius = size * (0.48 if i % 2 == 0 else 0.21)
-        points.append((cx + math.cos(angle) * radius,
-                       cy + math.sin(angle) * radius))
-    d.polygon(points, fill=(224, 255, 229, 255))
-    d.ellipse([cx - size * 0.12, cy - size * 0.12,
-               cx + size * 0.12, cy + size * 0.12], fill=(46, 130, 76, 255))
-
-
 def _draw_codex_mark(d, cx, cy, size):
     """Codex 的终端提示符标记：❯ 折线箭头 + 短横光标，洋红底盘反白。
 
     12px 下可辨识优先于品牌还原（圆桌结论：OpenAI 花结交织在此尺寸是物理
-    极限），与 GLM 晶体 / Kimi 星芒 / 番茄沙漏同为高对比简洁剪影。"""
+    极限），与 GLM 晶体 / 番茄沙漏同为高对比简洁剪影。"""
     width = max(2, round(size * 0.18))
     hw, hh = size * 0.26, size * 0.36
     d.line([(cx - hw - size * 0.12, cy - hh), (cx - hw + size * 0.16, cy),
@@ -1723,9 +1621,9 @@ def _draw_codex_mark(d, cx, cy, size):
 def _draw_mimo_mark(d, cx, cy, size):
     """MiMo 的橙色圆盘剪影：白色对话气泡 + 右上四角火花。
 
-    与 GLM 晶体 / Kimi 星芒 / Codex ❯_ / 番茄沙漏同属高对比简洁剪影——
-    12px 下可辨识优先于品牌还原：气泡是实心白块（远看轮廓唯一，不会与
-    星芒的尖角混淆），火花压在右上角补足「AI 助手」语义，两块之间留出
+    与 GLM 晶体 / Codex ❯_ / 番茄沙漏同属高对比简洁剪影——
+    12px 下可辨识优先于品牌还原：气泡是实心白块（远看轮廓唯一），
+    火花压在右上角补足「AI 助手」语义，两块之间留出
     约 0.3×半径的缺口，缩图后仍读得出是两个元素。"""
     h = size / 2
     white = (255, 255, 255, 255)
@@ -1813,9 +1711,9 @@ def _draw_activity_overlay(img, cx, cy, radius, state, now):
 
 def create_widget_image(values, pomo, dim, activity=None, glass=False,
                         slots=None):
-    """生成窄幅状态轨：GLM、Kimi、Codex（可多账号）、MiMo 与番茄阶段图标圆环。
+    """生成窄幅状态轨：GLM、Codex（可多账号）、MiMo 与番茄阶段图标圆环。
 
-    主轨只呈现各源最关键的一格读数（GLM/Kimi 短期额度、Codex 周预算、
+    主轨只呈现各源最关键的一格读数（GLM 短期额度、Codex 周预算、
     当前番茄阶段）；重置、周/月额度和精确读数保留在 hover 详情面板中。
     **MiMo 槽是例外（v1.45）**：不显示任何用量，只画图标 + 暗色轨道 +
     柔光呼吸灯（会话闲忙指示）。activity 给出各额度源的
@@ -1876,8 +1774,6 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False,
         remaining = values.get(key)
         if key == "glm":
             ring_color, disc_color = GLM_BLUE, GLM_BLUE
-        elif key == "kimi":
-            ring_color, disc_color = KIMI_GREEN, KIMI_GREEN
         else:  # codex 及各 slug 账号
             ring_color, disc_color = CODEX_MAGENTA, CODEX_DISC
         _draw_ring(d, img, cx, cy, radius, stroke,
@@ -1893,8 +1789,6 @@ def create_widget_image(values, pomo, dim, activity=None, glass=False,
             _draw_icon_disc(d, cx, cy, glyph_size * 0.75, disc_color)
             if key == "glm":
                 _draw_glm_mark(d, cx, cy, glyph_size)
-            elif key == "kimi":
-                _draw_kimi_mark(d, cx, cy, glyph_size)
             else:
                 _draw_codex_mark(d, cx, cy, glyph_size)
         _draw_quota_badge(d, cx, cy, radius, remaining)
@@ -1957,13 +1851,6 @@ def create_detail_image(info, target, glass=False):
         title, accent = "GLM 用量", GLM_BLUE
         line_one = f"周额度 {info['glm_weekly']:.0f}%"
         line_two = reset_text(info["glm_reset_ts"])
-        meta_x = 84
-    elif target == "kimi":
-        value = info["kimi_remaining"]
-        title, accent = "Kimi 用量", KIMI_GREEN
-        monthly = info["kimi_monthly"]
-        line_one = "月额度 --" if monthly is None else f"月额度 {monthly:.0f}%"
-        line_two = reset_text(info["kimi_reset_ts"])
         meta_x = 84
     elif target.startswith("codex"):
         slug = target.split(":", 1)[1] if ":" in target else ""
@@ -2262,7 +2149,7 @@ class GLMWidget:
         self._state_dirty = False
         self._state_saved_at = 0.0
 
-        # 状态：GLM（短期 Token 剩余 + 周额度剩余 + 短期窗口重置点）+ Kimi
+        # 状态：GLM（短期 Token 剩余 + 周额度剩余 + 短期窗口重置点）
         # + Codex（可多账号，slug → 读数 dict）+ 番茄钟。
         # 启动先用上次落盘的读数（跨启动保留最后读数，对齐 Codenotch UsageStore），
         # 首个刷新周期（5 分钟）内被真实数据替换；reset_ts 已过期的不恢复。
@@ -2273,11 +2160,6 @@ class GLMWidget:
         self._weekly_remaining = glm_saved.get("weekly", 100.0)
         self._quota_reset_ts = (glm_saved.get("reset_ts", 0)
                                 if glm_saved.get("reset_ts", 0) > now else 0.0)
-        kimi_saved = saved.get("kimi") or {}
-        self._kimi_remaining = kimi_saved.get("remaining")
-        self._kimi_reset_ts = (kimi_saved.get("reset_ts", 0)
-                               if kimi_saved.get("reset_ts", 0) > now else 0.0)
-        self._kimi_monthly_remaining = kimi_saved.get("monthly")
         codex_saved = saved.get("codex") or {}
         self._codex = {}
         for slug, _home in CODEX_PROFILES:
@@ -2434,11 +2316,6 @@ class GLMWidget:
                     "remaining": self._token_remaining,
                     "weekly": self._weekly_remaining,
                     "reset_ts": self._quota_reset_ts,
-                },
-                "kimi": {
-                    "remaining": self._kimi_remaining,
-                    "reset_ts": self._kimi_reset_ts,
-                    "monthly": self._kimi_monthly_remaining,
                 },
                 "codex": {
                     slug: {
@@ -2870,9 +2747,6 @@ class GLMWidget:
             "glm_remaining": self._token_remaining,
             "glm_reset_ts": self._quota_reset_ts,
             "glm_weekly": self._weekly_remaining,
-            "kimi_remaining": self._kimi_remaining,
-            "kimi_reset_ts": self._kimi_reset_ts,
-            "kimi_monthly": self._kimi_monthly_remaining,
             "codex_remaining": codex.get("remaining"),
             "codex_weekly_used": (codex.get("weekly") or (0.0, 0.0))[0],
             "codex_weekly_limit": (codex.get("weekly") or (0.0, 0.0))[1],
@@ -2902,8 +2776,6 @@ class GLMWidget:
         disp = self._disp
         values = {
             "glm": disp.get("glm", self._token_remaining),
-            "kimi": (disp.get("kimi", self._kimi_remaining)
-                     if self._kimi_remaining is not None else None),
         }
         for slug, c in self._codex.items():
             key = "codex" if not slug else f"codex:{slug}"
@@ -2936,19 +2808,6 @@ class GLMWidget:
                     h, rem = divmod(int(left), 3600)
                     parts[-1] += f"（{h}h{rem // 60:02d}m 后重置）"
                 parts.append(f"GLM 周额度剩余: {self._weekly_remaining:.0f}%")
-        if "kimi" in self._dead:
-            parts.append("Kimi: 无响应，图标已暂时摘除（恢复后自动回归）")
-        elif self._kimi_remaining is None:
-            parts.append("Kimi: 无数据（未检测到 Kimi 本地服务）")
-        else:
-            kp = f"Kimi 短期剩余: {self._kimi_remaining:.0f}%"
-            if self._kimi_reset_ts:
-                left = max(0, self._kimi_reset_ts - time.time())
-                h, rem = divmod(int(left), 3600)
-                kp += f"（{h}h{rem // 60:02d}m 后重置）"
-            parts.append(kp)
-            if self._kimi_monthly_remaining is not None:
-                parts.append(f"Kimi 月额度剩余: {self._kimi_monthly_remaining:.0f}%")
         for slug, c in self._codex.items():
             name = "Codex" if not slug else f"Codex·{slug}"
             if self._codex_key(slug) in self._dead:
@@ -3078,7 +2937,7 @@ class GLMWidget:
     def _do_refresh(self):
         """全源刷新：各自独立线程拉取（任一源超时不拖累其余源 UI 更新）。
         MiMo 不抓用量（v1.45 只做会话指示），所以不进这条链。"""
-        for key in ("glm", "kimi"):
+        for key in ("glm",):
             if key not in DISABLED_SOURCES:
                 self._refresh_source(key, schedule=False)
         for slug, home in CODEX_PROFILES:
@@ -3091,8 +2950,6 @@ class GLMWidget:
         扫描线程驱动，不需要刷新）。"""
         if key == "glm":
             self._spawn_fetch("glm", fetch_usage, self._apply_glm_usage)
-        elif key == "kimi":
-            self._spawn_fetch("kimi", fetch_kimi_usage, self._apply_kimi_usage)
         elif key and key.startswith("codex"):
             slug = key.split(":", 1)[1] if ":" in key else ""
             home = dict(CODEX_PROFILES).get(slug)
@@ -3146,24 +3003,6 @@ class GLMWidget:
             weekly_pct = result.get("weekly_percentage")
             if weekly_pct is not None:
                 self._weekly_remaining = min(max(100 - weekly_pct, 0), 100)
-            self._save_state(throttle=True)
-        self._render()
-
-    def _apply_kimi_usage(self, kimi):
-        """UI 线程应用 Kimi 抓取结果；daemon 不在跑时不清空既有读数，
-        从未有过数据则保持 None（空轨道）。"""
-        self._last_refresh = datetime.now().strftime("%H:%M:%S")
-        self._note_fetch_result("kimi", bool(kimi))
-        if kimi:
-            self._kimi_remaining = min(
-                max(100 - kimi["short_term_percentage"], 0), 100)
-            self._set_targets(kimi=self._kimi_remaining)
-            self._kimi_reset_ts = kimi["short_term_reset_ts"]
-            monthly_pct = kimi.get("monthly_percentage")
-            if monthly_pct is not None:
-                self._kimi_monthly_remaining = min(
-                    max(100 - monthly_pct, 0), 100)
-            self._check_alert("kimi", "Kimi 短期", self._kimi_remaining)
             self._save_state(throttle=True)
         self._render()
 
@@ -3244,7 +3083,7 @@ class GLMWidget:
         if not self._activity:
             self._activity = states
         else:
-            names = {"glm": "GLM", "kimi": "Kimi", "mimo": "MiMo"}
+            names = {"glm": "GLM", "mimo": "MiMo"}
             for key, new in states.items():
                 old = self._activity.get(key)
                 self._activity[key] = new
