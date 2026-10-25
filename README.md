@@ -1,6 +1,6 @@
-# GLM Plan Dashboard v1.45
+# GLM Plan Dashboard v1.46
 
-GLM + Kimi + Codex + MiMo 四源悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏四个图标圆环分别显示短期额度、Codex 周预算、**MiMo 会话活跃（只做呼吸灯，v1.45 起不显示用量）**和当前番茄阶段剩余，图标下方显示百分比（MiMo 槽无百分比）。GLM 源 v1.40 起暂时停用，见 `DISABLED_SOURCES`，删掉那个元组里的 `"glm"` 即可恢复。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
+GLM + Kimi + Codex + MiMo 四源悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，GLM 深蓝晶体、Kimi 绿色星芒、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏五个图标圆环分别显示 GLM 短期额度（v1.46 起恢复，coding plan 积分口径）、Kimi 短期额度、Codex 周预算、**MiMo 会话活跃（只做呼吸灯，v1.45 起不显示用量）**和当前番茄阶段剩余，图标下方显示百分比（MiMo 槽无百分比）。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
 
 ## 预览
 
@@ -19,12 +19,12 @@ GLM + Kimi + Codex + MiMo 四源悬浮小组件 + 番茄工作闹钟，深色状
 - **左右贴边自动隐藏**：卡片左/右缘进入所在屏对应竖边 24px 内（两边都够到取更近者）松手，空闲 1.2 秒滑入该侧屏缘，露出 6px **竖向番茄进度条**（水位式：满格齐顶、随剩余时间自上而下回落，落空即到点；剩余 >50% 绿 / 20–50% 黄 / <20% 红）；鼠标触及该侧屏缘即滑出（启动后 5 秒宽限期不隐藏；拖离屏缘后不启用）。左/右停靠全对称：细边热区、region 裁剪、所在屏判定锚点、hover 面板展开方向（左停靠向右展开）随停靠侧镜像，跨屏拖动到哪块屏就贴哪块屏，停靠侧与位置记忆在 `ui_state.json`（旧文件无 `side` 字段按右停靠兼容）
 - **hover 详情面板**：悬停单个图标 0.3 秒，在其靠屏内一侧展开 168×64 的局部详情卡片；切换图标只更新对应项，离开轨道和卡片 0.3 秒后收起
 
-**状态轨（v1.28 · v1.35 扩至五槽 · v1.40 GLM 暂停用 → 四槽）**
-- 44px 宽的完整胶囊内固定圆环：Kimi 5h 短期额度（绿色星芒）、Codex 周预算（洋红终端符）、**MiMo 会话活跃**（橙色气泡火花，只做呼吸灯、不显示用量）、当前番茄阶段剩余（工作紫 / 休息 teal / 非工作灰）。前三者与番茄在图标下方显示对应剩余百分比，图标和位置保持固定，便于形成空间记忆。**GLM 深蓝晶体槽当前停用**：`main.py` 的 `DISABLED_SOURCES = ("glm",)` 一并关掉槽位、周期刷新与闲忙通知（与「故障摘牌」不同——摘牌仍会周期探测并可能复活刷日志，停用是彻底不碰），fetch / 图标 / 详情卡 / 告警代码全部保留，删掉元组里的 `"glm"` 即恢复
-- 平台主色不随额度变化，低于 40% 时用橙色小点提示，低于 15% 时用红色小点提示；精确百分比、重置时间、Kimi 月额度、Codex 周绝对值（$已用/$上限）与今日消耗、MiMo 套餐已用 token 数与预算全部保留在 hover 详情中（GLM 周额度在启用时一并显示）
+**状态轨（v1.28 · v1.35 扩至五槽 · v1.40 GLM 暂停用 · v1.46 恢复 → 五槽）**
+- 44px 宽的完整胶囊内固定圆环：GLM 短期额度（深蓝晶体，v1.46 起恢复，coding plan 积分口径）、Kimi 5h 短期额度（绿色星芒）、Codex 周预算（洋红终端符）、**MiMo 会话活跃**（橙色气泡火花，只做呼吸灯、不显示用量）、当前番茄阶段剩余（工作紫 / 休息 teal / 非工作灰）。前四者与番茄在图标下方显示对应剩余百分比，图标和位置保持固定，便于形成空间记忆。`DISABLED_SOURCES` 现为空元组（v1.40 曾用它停用 GLM），机制保留：需要临时停用某个源时把它的 key 加进元组即可——一处开关同时关掉槽位、周期刷新与闲忙通知（与「故障摘牌」不同：摘牌仍会周期探测并可能复活刷日志，停用是彻底不碰），fetch / 图标 / 详情卡 / 告警代码全部保留
+- 平台主色不随额度变化，低于 40% 时用橙色小点提示，低于 15% 时用红色小点提示；精确百分比、重置时间、Kimi 月额度、Codex 周绝对值（$已用/$上限）与今日消耗、MiMo 套餐已用 token 数与预算全部保留在 hover 详情中（GLM 周额度一并显示）
 - Kimi 本地 daemon、Codex 中转、MiMo 端点不可用时显示灰色虚线占位环，真实额度耗尽仍是红色警示点；番茄非工作时段使用灰色沙漏环，不把它误报为额度耗尽。
 - 主轨只在状态变化时重绘：番茄钟每秒一帧、额度刷新后的缓动才 30fps，保留原有离屏 Pillow + Win32 分层窗口路径，无额外运行时依赖。
-- 每 5 分钟自动刷新数据，各源（Kimi 走本地 daemon、Codex 走中转站 `/v1/usage`、MiMo 走本机账本）各自独立线程拉取与落地，任一源超时不拖慢其余源的 UI 更新；**MiMo 本机账本另有 10 秒独立快刷**（`MIMO_FAST_INTERVAL`，纯本地 sqlite、无网络无配额成本，只在本机账本模式下启用，配了远端端点就交回全源周期）
+- 每 5 分钟自动刷新数据，各源（GLM 走平台用量接口、Kimi 走本地 daemon、Codex 走中转站 `/v1/usage`、MiMo 走本机账本）各自独立线程拉取与落地，任一源超时不拖慢其余源的 UI 更新；**MiMo 本机账本另有 10 秒独立快刷**（`MIMO_FAST_INTERVAL`，纯本地 sqlite、无网络无配额成本，只在本机账本模式下启用，配了远端端点就交回全源周期）
 - **MiMo 环下显示一位小数**（`93.7%`）：token 套餐总额度十亿级，涨 1% 要 1.1 亿 token、约 20 小时才挪一格，整数百分比几乎永远不动；一位小数（≈1100 万 token 一格）配合 10 秒快刷才有变化可看。宽度顶到胶囊内侧（如 `100.0%`）自动回退整数，其余槽位仍是整数，风格不变
 
 **Codex 用量源（v1.28）**
@@ -71,7 +71,7 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 
 **API 配置来源（优先级从高到低）**：
 
-> **GLM 源当前停用（v1.40）**：`main.py` 的 `DISABLED_SOURCES = ("glm",)` 会一并跳过状态轨槽位、周期刷新与闲忙通知，所以下面这套 GLM 配置优先级暂时用不上（也就不必再为它修 key）。要恢复：删掉该元组里的 `"glm"`；若 key 已失效，先按下方「刷新兜底 key」重跑 `setup_config.py`。
+> **GLM 源已恢复（v1.46）**：当前生效凭证是项目 `config.json` 里同账户的 bigmodel API key（仅用于查用量，gitignore 覆盖不外流）。注意 ZCode 的 OAuth coding plan 凭证存在加密凭据库（`enc:v1:`），仪表盘读不到，所以第 1 级「ZCode 当前配置」现在实际回落到第 2 级 `config.json`——这正是 v1.46 清空 `~/.zcode/v2/config.json` 里失效的 `builtin:bigmodel` 明文 key 的原因（它会以最高优先级遮住 config.json 的新 key）。
 
 1. **ZCode 当前配置（默认生效，自动跟随更新）**：`~/.zcode/cli/config.json` 的 `model.providerId` 记录 ZCode 当前选中的供应商，其 `apiKey` / `baseURL` 明文存于 `~/.zcode/v2/config.json` 的 `provider[<id>].options`。仪表盘每次刷新（5 分钟）都现读这两个文件，**在 ZCode 里换 key、换供应商后无需任何手动操作**，最迟一个刷新周期自动生效。若活动供应商无可用 key（如切换到 OAuth 类套餐），自动改用配置中任一已启用且带 key 的供应商。
 2. **项目 `config.json`**（已被 `.gitignore` 忽略，不会上传 key）：ZCode 不可用时的独立兜底，由 `setup_config.py` 固化。
@@ -87,12 +87,18 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 **从 Agent / 沙盒环境重启（重要）**：DSH 等自动化沙盒把每条命令放进带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Windows Job Object，命令一结束整棵进程树（含 `wscript` 拉起的 pythonw）会被强制回收——表现为"启动成功、几秒后无声消失、无任何日志"。正确做法是让 explorer 代为启动，使 pythonw 挂到 explorer 进程树下、脱离沙盒 Job：
 
 ```powershell
-C:\Windows\explorer.exe "E:\GIT_Space\glm-plan-dashboard\launch-dashboard.vbs"
+C:\Windows\explorer.exe "D:\Git-仓库\glm-plan-dashboard\launch-dashboard.vbs"
 ```
 
-在沙盒里直接 `wscript launch-dashboard.vbs`、`pythonw main.py` 或 `schtasks` 均不可行（前两者被 Job 连坐回收，后者被沙盒拦截）。进程在跑但看不到悬浮窗时，先检查它是否缩成了屏缘 6px 细条（鼠标触及该侧屏缘即滑出），位置记忆在 `ui_state.json`。
+在沙盒里直接 `wscript launch-dashboard.vbs`、`pythonw main.py` 或 `schtasks` 均不可行（前两者被 Job 连坐回收，后者被沙盒拦截）。从 Git Bash 直接调 explorer 传中文路径可能因参数编码丢失而不触发，改用 `powershell Start-Process explorer.exe -ArgumentList "<vbs 路径>"`。进程在跑但看不到悬浮窗时，先检查它是否缩成了屏缘 6px 细条（鼠标触及该侧屏缘即滑出），位置记忆在 `ui_state.json`。
 
 ## 更新日志
+
+### v1.46
+- **GLM 槽恢复**：v1.40 因 key 失效停用的 GLM 源重新启用——使用者回归 GLM Coding Plan（bigmodel 个体版，OAuth 登录 ZCode），另提供同账户 API key（仅用于查用量）写入项目 `config.json`。`DISABLED_SOURCES = ()` 恢复五槽（44×312，`SLOT_LAYOUT` 自动推导）
+- **用量接口兼容积分口径**：coding plan 的用量接口不再返回 `TOKENS_LIMIT` 而是 `CREDIT_LIMIT`（积分额度，字段同构：unit=3 短期窗口、unit=6 周窗口、percentage=已用百分比、nextResetTime=毫秒时间戳）。解析过滤从单收 `TOKENS_LIMIT` 扩为两种都收，其余逻辑（剩余=100−已用、重置倒计时、阈值告警）原样复用。实测短期 12000 积分已用 56、周 60000 积分已用 56，环 99%、倒计时正常
+- **凭证链修正**：`~/.zcode/v2/config.json` 里 `builtin:bigmodel` 的失效明文 key 清空（备份 `.bak.20261025`）——它属于配置链最高优先级，不清空会一直遮住 `config.json` 的新 key，GLM 槽永远拿死 key 撞 `Authentication Failed`。已确认 ZCode 的 OAuth coding plan 凭证（`oauth:bigmodel:access_token` 等）在加密凭据库（`enc:v1:`）中、无明文副本，仪表盘读不到；会话进程环境里的 `ANTHROPIC_API_KEY` 是 zcode.z.ai 网关专用 key，对 open.bigmodel.cn 无效——「零配置读当前套餐用量」没有路径，key 是唯一解
+- **launch-dashboard.vbs 修正**：删掉硬编码的旧 E 盘路径（本机不存在，explorer 代启静默失败），改为运行时推导——脚本目录取 `WScript.ScriptFullName`、pythonw 走 PATH（`D:\ProgramData\anaconda3` 在 PATH 上）；文件保持纯 ASCII 并注明原因：**wscript 按 ANSI 读 .vbs，UTF-8 写入的中文路径会变乱码**（实测踩坑：wscript 弹错误框、pythonw 不启动）
 
 ### v1.45
 - **MiMo 槽改为纯会话指示**：需求方明确「不要显示用量和相关的信息，确保用的时候有呼吸灯就行」——环只画暗色轨道（不画额度弧）、环下不写百分比、不弹额度小点，hover 详情卡只报会话状态（忙 / 等待 / 空闲）。图标与呼吸灯（忙=白色 2.4s 呼吸、等你输入=琥珀脉冲）保持不变

@@ -408,9 +408,12 @@ def fetch_usage():
                 # 不抛异常、走静默 None，但必须留痕，否则排查时日志一片空白
                 print(f"GLM 用量接口无额度数据: {body.get('msg') or str(body)[:150]}")
                 return None
+            # type 有两种口径：TOKENS_LIMIT 是 token 套餐/资源包，CREDIT_LIMIT 是
+            # coding plan 的积分额度（2026-10 实测个体版返回后者，字段同构：
+            # unit=3 短期窗口、unit=6 周窗口，percentage=已用百分比，nextResetTime=毫秒）
             token_limits = [
                 item for item in data.get("limits", [])
-                if item.get("type") == "TOKENS_LIMIT"
+                if item.get("type") in ("TOKENS_LIMIT", "CREDIT_LIMIT")
             ]
             if token_limits:
                 # unit=3 是 5 小时短期窗口，unit=6 是周窗口。不要用重置时间推断：
@@ -1515,10 +1518,9 @@ RAIL_RADIUS = WIDGET_W // 2
 # MiMo 排在各 LLM 源之后、番茄钟之前：上段全是额度源，下段是时间源。
 #
 # 暂时停用的源：既不进状态轨，也不参与周期刷新与闲忙通知。停用 ≠ 故障摘牌
-# ——摘牌仍会周期探测、成功一次就复活并刷日志；这里是彻底关掉。GLM 的 key
-# 当前失效（接口恒回 Authentication Failed），使用者暂不用它，需要时把
-# "glm" 从这个元组里删掉即可：fetch、图标、详情卡、告警代码全都还在。
-DISABLED_SOURCES = ("glm",)
+# ——摘牌仍会周期探测、成功一次就复活并刷日志；这里是彻底关掉。需要停用某个
+# 源时把它的 key 加进这个元组即可：fetch、图标、详情卡、告警代码全都还在。
+DISABLED_SOURCES = ()
 
 _SLOT_KEYS = (["glm", "kimi"]
               + ["codex" if not slug else f"codex:{slug}"
