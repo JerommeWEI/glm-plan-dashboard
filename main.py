@@ -98,7 +98,11 @@ REFRESH_INTERVAL = 300      # 有会话活跃时的刷新间隔：5 分钟
 IDLE_REFRESH_INTERVAL = 600  # 全部源空闲（无会话活动）时降频到 10 分钟
 BACKOFF_BASE = 60           # 429 退避起步秒数，连续触发翻倍
 BACKOFF_CAP = 900           # 退避上限 15 分钟
-DEAD_AFTER = 3              # 连续多少次抓取无响应 → 摘掉该源图标（成功一次即恢复）
+# 连续多少次抓取无响应 → 摘掉该源图标（成功一次即恢复）。12 次 ≈ 1 小时：
+# Codex 走的 NexPath 节点 2026-10-25 实测分钟级抖动（好窗口/坏窗口交替），
+# 5 分钟一轮的抓取成功率约五成，阈值 3 会让图标每十几分钟挂起一次；放宽后
+# 抖动期图标常驻、读数照常在好窗口更新，真死掉的源（如 key 失效）1 小时内仍会摘
+DEAD_AFTER = 12
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"  # 项目本地独立配置（脱离 cc 的兜底）
 # ZCode 的 API 配置（最高优先级，自动跟随其更新）：
@@ -463,11 +467,19 @@ def fetch_usage():
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 CODEX_USAGE_HOSTS = ("uapi.ccwu.cc",)   # 中转站用量接口白名单（沿用 GLM 的 SSRF 策略）
 CODEX_USAGE_MAX_BYTES = 65536           # 响应体上限：正常几十 KB，防异常流撑爆内存
-# 直连被重置时的回退代理：墙内 uapi.ccwu.cc 的 TLS 握手会被 RST，而 Codex CLI
-# 走的通道组件拿不到（无系统代理、无 HTTPS_PROXY），故显式指向本机 Clash 混合端口。
-# 空串禁用回退；仅 HTTP(S) 代理，目标是公网白名单域名，不引入新的 SSRF 面。
-CODEX_PROXY_URL = os.environ.get("CODEX_PROXY_URL", "http://127.0.0.1:7897")
+# 直连被重置时的回退代理：墙内 uapi.ccwu.cc 的 TLS 握手会被 RST。本机代理已从
+# Clash 换成 NexPath（Hiddify/sing-box 系，HTTP+SOCKS 混合口 12334，即系统代理口），
+# 故显式指向它。注意 build_opener 默认会读注册表系统代理——NexPath 开着「系统
+# 代理」时第一段直连其实已经在走它，这段显式回退覆盖的是系统代理开关关闭但
+# NexPath 在跑的情况。空串禁用回退；仅 HTTP(S) 代理，目标是公网白名单域名，
+# 不引入新的 SSRF 面。
+CODEX_PROXY_URL = os.environ.get("CODEX_PROXY_URL", "http://127.0.0.1:12334")
 _codex_proxy_opener = None
+# 节点抖动应对：NexPath 自动测速选节点时是分钟级好/坏窗口交替（2026-10-25
+# 实测约 1 分钟一翻），单次尝试撞进坏窗口不代表下一秒还坏——失败后间隔重试，
+# 三次铺开约 50s，基本必跨过一整个坏窗口。抓取在独立线程里，重试不拖累其余源
+CODEX_RETRY_ATTEMPTS = 3
+CODEX_RETRY_GAP = 25      # 重试间隔（秒），与坏窗口时长同一量级
 
 
 def _discover_codex_profiles():
@@ -597,10 +609,12 @@ def fetch_codex_usage(home=CODEX_HOME, source="codex"):
         "Authorization": f"Bearer {key}",
         "Accept-Language": "en-US,en",
     })
-    try:
+
+    def _fetch_once():
+        # 两路：直连段（build_opener 默认读注册表系统代理）+ 显式回退代理段
         try:
             with _OPENER.open(req, timeout=10) as resp:
-                raw = resp.read(CODEX_USAGE_MAX_BYTES + 1)
+                return resp.read(CODEX_USAGE_MAX_BYTES + 1)
         except URLError:
             # 直连被重置/超时才走本机代理重试；代理也未配置或仍失败则照常报错。
             global _codex_proxy_opener
@@ -610,8 +624,26 @@ def fetch_codex_usage(home=CODEX_HOME, source="codex"):
                 _codex_proxy_opener = build_opener(_NoRedirect, ProxyHandler(
                     {"http": CODEX_PROXY_URL, "https": CODEX_PROXY_URL}))
             with _codex_proxy_opener.open(req, timeout=10) as resp:
-                raw = resp.read(CODEX_USAGE_MAX_BYTES + 1)
-            print("Codex 用量直连失败，已走代理重试成功")
+                return resp.read(CODEX_USAGE_MAX_BYTES + 1)
+
+    # 网络段失败跨窗口重试；解析段错误不重试（重试也救不了）
+    raw = None
+    for attempt in range(1, CODEX_RETRY_ATTEMPTS + 1):
+        try:
+            raw = _fetch_once()
+            if attempt > 1:
+                print(f"Codex 用量第 {attempt} 次尝试成功（节点坏窗口已翻面）")
+            break
+        except (URLError, OSError) as exc:
+            if attempt >= CODEX_RETRY_ATTEMPTS:
+                _gate_report(source, exc)
+                print(f"Codex 用量错误: {exc}")
+                return None
+            print(f"Codex 用量第 {attempt}/{CODEX_RETRY_ATTEMPTS} 次尝试失败"
+                  f"（{exc}），{CODEX_RETRY_GAP}s 后跨窗口重试")
+            time.sleep(CODEX_RETRY_GAP)
+
+    try:
         if len(raw) > CODEX_USAGE_MAX_BYTES:
             print("Codex 用量响应超过大小上限，已丢弃")
             return None
@@ -643,9 +675,7 @@ def fetch_codex_usage(home=CODEX_HOME, source="codex"):
             "unrestricted": (body.get("mode") == "unrestricted"
                              and not sub.get("daily_limit_usd")),
         }
-    except (URLError, OSError, json.JSONDecodeError, ValueError,
-            TypeError) as exc:
-        _gate_report(source, exc)
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
         print(f"Codex 用量错误: {exc}")
         return None
 
