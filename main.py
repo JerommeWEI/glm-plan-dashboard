@@ -25,7 +25,8 @@ from datetime import datetime, time as dtime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import (HTTPRedirectHandler, ProxyHandler, Request,
+                            build_opener)
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from winotify import Notification
@@ -63,6 +64,35 @@ class _Tee:
 _log_file = open(_LOG_PATH, "a", encoding="utf-8", buffering=1)  # 行缓冲
 sys.stdout = _Tee(sys.stdout, _log_file)
 sys.stderr = _Tee(sys.stderr, _log_file)
+
+
+def _install_exc_hooks():
+    """防闪退兜底：任何线程的未捕获异常只记录、不杀进程。
+    覆盖三层——主线程（sys.excepthook，默认打印后退出进程）、
+    子线程（threading.excepthook，默认只打印到 stderr）、
+    Tk 主循环回调（report_callback_exception，默认行为依版本而异）。"""
+
+    def _dump(where):
+        def handler(*args):
+            print(f"==== 未捕获异常（{where}）====")
+            traceback.print_exception(*args)
+        return handler
+
+    sys.excepthook = _dump("主线程")
+    if hasattr(sys, "unraisablehook"):
+        sys.unraisablehook = _dump("unraisable")
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = lambda e: _dump("子线程")(
+            e.exc_type, e.exc_value, e.exc_traceback)
+
+    def _tk_handler(exc_type, exc_value, exc_tb):
+        print("==== Tk 回调未捕获异常 ====")
+        traceback.print_exception(exc_type, exc_value, exc_tb)
+
+    return _tk_handler
+
+
+_TK_CALLBACK_EXC_HOOK = _install_exc_hooks()
 
 REFRESH_INTERVAL = 300      # 有会话活跃时的刷新间隔：5 分钟
 IDLE_REFRESH_INTERVAL = 600  # 全部源空闲（无会话活动）时降频到 10 分钟
@@ -516,6 +546,11 @@ def fetch_kimi_usage():
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 CODEX_USAGE_HOSTS = ("uapi.ccwu.cc",)   # 中转站用量接口白名单（沿用 GLM 的 SSRF 策略）
 CODEX_USAGE_MAX_BYTES = 65536           # 响应体上限：正常几十 KB，防异常流撑爆内存
+# 直连被重置时的回退代理：墙内 uapi.ccwu.cc 的 TLS 握手会被 RST，而 Codex CLI
+# 走的通道组件拿不到（无系统代理、无 HTTPS_PROXY），故显式指向本机 Clash 混合端口。
+# 空串禁用回退；仅 HTTP(S) 代理，目标是公网白名单域名，不引入新的 SSRF 面。
+CODEX_PROXY_URL = os.environ.get("CODEX_PROXY_URL", "http://127.0.0.1:7897")
+_codex_proxy_opener = None
 
 
 def _discover_codex_profiles():
@@ -646,8 +681,20 @@ def fetch_codex_usage(home=CODEX_HOME, source="codex"):
         "Accept-Language": "en-US,en",
     })
     try:
-        with _OPENER.open(req, timeout=10) as resp:
-            raw = resp.read(CODEX_USAGE_MAX_BYTES + 1)
+        try:
+            with _OPENER.open(req, timeout=10) as resp:
+                raw = resp.read(CODEX_USAGE_MAX_BYTES + 1)
+        except URLError:
+            # 直连被重置/超时才走本机代理重试；代理也未配置或仍失败则照常报错。
+            global _codex_proxy_opener
+            if not CODEX_PROXY_URL:
+                raise
+            if _codex_proxy_opener is None:
+                _codex_proxy_opener = build_opener(_NoRedirect, ProxyHandler(
+                    {"http": CODEX_PROXY_URL, "https": CODEX_PROXY_URL}))
+            with _codex_proxy_opener.open(req, timeout=10) as resp:
+                raw = resp.read(CODEX_USAGE_MAX_BYTES + 1)
+            print("Codex 用量直连失败，已走代理重试成功")
         if len(raw) > CODEX_USAGE_MAX_BYTES:
             print("Codex 用量响应超过大小上限，已丢弃")
             return None
@@ -3386,6 +3433,8 @@ class GLMWidget:
     # 启动 -----------------------------------------------------------
     def run(self):
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] start: pid={os.getpid()}")  # 会话分界，便于事后定位闪退点
+        # Tk 回调（after / bind / mainloop 内）抛异常时只记录不退出
+        self.root.report_callback_exception = _TK_CALLBACK_EXC_HOOK
         register_aumid()                          # 注册通知应用 ID
         self.root.after(500, self._do_refresh)    # Token 刷新
         self.root.after(1000, self._pomo_tick)    # 番茄钟启动
@@ -3422,4 +3471,19 @@ if __name__ == "__main__":
         traceback.print_exc()  # 锁屏服务失败不影响 dashboard 本体
     # ---------------------------------------------------------------------------
 
-    GLMWidget().run()
+    # 主线程致命异常兜底：记录后自动重启 UI（最多连续 5 次，防止死循环刷日志）
+    _RESTART_LIMIT, _restarts = 5, 0
+    while True:
+        try:
+            GLMWidget().run()
+            break  # 正常退出（托盘菜单退出等）
+        except SystemExit:
+            raise
+        except BaseException:
+            traceback.print_exc()
+            print(f"==== 主循环异常退出，自动重启（第 {_restarts + 1}/{_RESTART_LIMIT} 次）====")
+            _restarts += 1
+            if _restarts >= _RESTART_LIMIT:
+                print("==== 连续重启达上限，放弃重启 ====")
+                break
+            time.sleep(5)  # 稍等再拉起，避免异常风暴刷屏
