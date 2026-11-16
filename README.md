@@ -1,13 +1,13 @@
-# GLM Plan Dashboard v1.47
+# GLM Plan Dashboard v1.48
 
-GLM + Codex + MiMo 三源悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的完整胶囊中，GLM 深蓝晶体、Codex 洋红终端符、MiMo 橙色气泡火花、番茄沙漏四个图标圆环分别显示 GLM 短期额度（v1.46 起恢复，coding plan 积分口径）、Codex 周预算、**MiMo 会话活跃（只做呼吸灯，v1.45 起不显示用量）**和当前番茄阶段剩余，图标下方显示百分比（MiMo 槽无百分比）。拖到任意屏松手就近贴边（左/右缘皆可）；v1.31 起借鉴 Codenotch 加入**会话闲忙可视化**（忙=整环白色呼吸灯、等你输入=琥珀柔光脉冲环）、**额度阈值告警**与**点击槽位刷新对应源**；v1.32 将详情卡与右键菜单全面升级为自绘 macOS 风（popover 弹出、圆角投影菜单）。空闲时自动缩成停靠侧 6px 进度细边，鼠标触及滑出，悬停单个图标展开其局部详情卡片。
+GLM + Codex 悬浮小组件 + 番茄工作闹钟，深色状态轨贴靠屏幕左/右缘：44px 宽的胶囊中仅显示 GLM、默认 Codex 和番茄钟三个图标。额外的 `codex:bili` 账号与已到期的 MiMo 当前停用，不显示槽位，也不参与周期刷新和会话提醒。悬停图标可查看对应详情，空闲时状态轨自动缩成停靠侧 6px 进度细边。
 
 ## 预览
 
-![深色胶囊状态轨与单项详情卡片](docs/sidebar-preview.png)
+![历史版本的深色胶囊状态轨与单项详情卡片](docs/sidebar-preview.png)
 
 ![v1.33 呼吸灯闲忙指示与柔光彗星额度环](docs/v133-breathing-preview.png)
-*v1.33：busy=整环白色呼吸灯（左峰值/右谷值）· 琥珀柔光=等你输入 · 彗星渐隐额度环无端点*
+*历史预览（当前状态轨为三槽）；v1.33：busy=整环白色呼吸灯（左峰值/右谷值）· 琥珀柔光=等你输入 · 彗星渐隐额度环无端点*
 
 ## 功能
 
@@ -19,22 +19,21 @@ GLM + Codex + MiMo 三源悬浮小组件 + 番茄工作闹钟，深色状态轨�
 - **左右贴边自动隐藏**：卡片左/右缘进入所在屏对应竖边 24px 内（两边都够到取更近者）松手，空闲 1.2 秒滑入该侧屏缘，露出 6px **竖向番茄进度条**（水位式：满格齐顶、随剩余时间自上而下回落，落空即到点；剩余 >50% 绿 / 20–50% 黄 / <20% 红）；鼠标触及该侧屏缘即滑出（启动后 5 秒宽限期不隐藏；拖离屏缘后不启用）。左/右停靠全对称：细边热区、region 裁剪、所在屏判定锚点、hover 面板展开方向（左停靠向右展开）随停靠侧镜像，跨屏拖动到哪块屏就贴哪块屏，停靠侧与位置记忆在 `ui_state.json`（旧文件无 `side` 字段按右停靠兼容）
 - **hover 详情面板**：悬停单个图标 0.3 秒，在其靠屏内一侧展开 168×64 的局部详情卡片；切换图标只更新对应项，离开轨道和卡片 0.3 秒后收起
 
-**状态轨（v1.28 · v1.35 扩至五槽 · v1.40 GLM 暂停用 · v1.46 恢复 · v1.47 移除 Kimi → 四槽）**
-- 44px 宽的完整胶囊内固定圆环：GLM 短期额度（深蓝晶体，v1.46 起恢复，coding plan 积分口径）、Codex 周预算（洋红终端符）、**MiMo 会话活跃**（橙色气泡火花，只做呼吸灯、不显示用量）、当前番茄阶段剩余（工作紫 / 休息 teal / 非工作灰）。前三者与番茄在图标下方显示对应剩余百分比，图标和位置保持固定，便于形成空间记忆。`DISABLED_SOURCES` 现为空元组（v1.40 曾用它停用 GLM），机制保留：需要临时停用某个源时把它的 key 加进元组即可——一处开关同时关掉槽位、周期刷新与闲忙通知（与「故障摘牌」不同：摘牌仍会周期探测并可能复活刷日志，停用是彻底不碰），fetch / 图标 / 详情卡 / 告警代码全部保留
-- 平台主色不随额度变化，低于 40% 时用橙色小点提示，低于 15% 时用红色小点提示；精确百分比、重置时间、Codex 周绝对值（$已用/$上限）与今日消耗、MiMo 套餐已用 token 数与预算全部保留在 hover 详情中（GLM 周额度一并显示）
-- Codex 中转、MiMo 端点不可用时显示灰色虚线占位环，真实额度耗尽仍是红色警示点；番茄非工作时段使用灰色沙漏环，不把它误报为额度耗尽。
+**状态轨（当前三槽）**
+- 44px 宽的胶囊内依次显示 GLM 短期额度、默认 Codex 周预算和番茄阶段剩余。`DISABLED_SOURCES = ("codex:bili", "mimo")` 同时关闭对应槽位、周期刷新与闲忙通知；保留相关代码和本地账号目录。
+- 平台主色不随额度变化，低于 40% 时用橙色小点提示，低于 15% 时用红色小点提示；精确百分比、重置时间、Codex 周绝对值（$已用/$上限）与今日消耗保留在 hover 详情中（GLM 周额度一并显示）。
+- Codex 中转不可用时显示灰色虚线占位环，真实额度耗尽仍是红色警示点；番茄非工作时段使用灰色沙漏环，不把它误报为额度耗尽。
 - 主轨只在状态变化时重绘：番茄钟每秒一帧、额度刷新后的缓动才 30fps，保留原有离屏 Pillow + Win32 分层窗口路径，无额外运行时依赖。
-- 每 5 分钟自动刷新数据，各源（GLM 走平台用量接口、Codex 走中转站 `/v1/usage`、MiMo 走本机账本）各自独立线程拉取与落地，任一源超时不拖慢其余源的 UI 更新；**MiMo 本机账本另有 10 秒独立快刷**（`MIMO_FAST_INTERVAL`，纯本地 sqlite、无网络无配额成本，只在本机账本模式下启用，配了远端端点就交回全源周期）
-- **MiMo 环下显示一位小数**（`93.7%`）：token 套餐总额度十亿级，涨 1% 要 1.1 亿 token、约 20 小时才挪一格，整数百分比几乎永远不动；一位小数（≈1100 万 token 一格）配合 10 秒快刷才有变化可看。宽度顶到胶囊内侧（如 `100.0%`）自动回退整数，其余槽位仍是整数，风格不变
+- GLM 走平台用量接口、默认 Codex 走中转站 `/v1/usage`；两者独立线程拉取与落地，任一源超时不拖慢另一源的 UI 更新。活跃时每 5 分钟刷新，空闲时每 10 分钟刷新。
 
 **Codex 用量源（v1.28）**
 - 数据来自 Codex CLI 所配中转站（`~/.codex/config.toml` 顶层 `model_provider` 指向供应商的 `base_url`，白名单 `uapi.ccwu.cc`；key 为 `~/.codex/auth.json` 的 `OPENAI_API_KEY`，Bearer 鉴权），请求 `GET {base}/v1/usage`
 - 额度为 USD 计价订阅，无 5h 窗口：环语义取**周预算剩余比例**（如 (300-17.4)/300），hover 详情给「周 $17.4/$300 · 6天9h 后预计重置 · 今日 $17.4」；`daily_limit_usd=0` 且 `mode=unrestricted` 表示无日限额，今日已用只以文字呈现、绝不折算成比例
 - 周重置时刻由 `weekly_window_start + 7 天` 推算（服务端无显式 reset 字段），窗口起点在未来或已越过推算点时显示「等待窗口」而非编造倒计时；安全策略沿用 GLM 源（https + 域名白名单 + DNS 后私网阻断 + 禁重定向 + 响应体 64KB 上限）
 
-**MiMo 槽（v1.35 加入 · v1.45 起只做会话指示）**
-- **不显示任何用量**：环只画暗色轨道（不画额度弧）、环下不写百分比、不弹额度小点；hover 详情卡只报会话状态（忙 / 等待 / 空闲）。橙色圆盘 + 白色「对话气泡 + 四角火花」图标固定不动
-- **唯一的动态就是呼吸灯**：会话文件取 `mimocode.db` 主库 + `-wal` 的 mtime（`_newest_mtime` 支持单个文件目标，不 walk 整棵树）；忙 = 整环白色呼吸灯（2.4s 正弦）、停写但 MiMo Desktop 进程仍在 = 琥珀脉冲，与其它源同一套语义（90s / 15min）。**会话结束 toast 对 MiMo 抑制**——MiMo Desktop 自己就弹「任务完成」，再弹是重复
+**MiMo 槽（已停用，以下为历史实现）**
+- 停用前只显示会话状态：环画暗色轨道，hover 详情卡报告忙 / 等待 / 空闲；不显示用量。
+- 呼吸灯曾以 `mimocode.db` 主库及 `-wal` 的 mtime 判断活动；现在不扫描 MiMo 会话，也不显示这个槽位。
 - **用量抓取已停用但代码保留**（`fetch_mimo_usage` 一整段：官方接口 + 本机账本 + 官方基线）：v1.43 曾接通官方平台接口 `GET platform.xiaomimimo.com/api/v1/tokenPlan/usage`（cookie 鉴权，与控制台逐位一致），但那份平台会话 cookie 是浏览器静默续期的短命凭证、拷出来约一天就过期，反复补 cookie 不划算。要恢复用量显示，把 `create_widget_image` / `create_detail_image` 的 mimo 分支改回读 `values["mimo"]`、并在 `_do_refresh` 里重新 `spawn_fetch(mimo)` 即可
 - `config.json` 的 `mimo` 段（`url` / `token` / `auth` / `budget` / `baseline_*`）现在**不会被读取**，留着只是为了恢复用量时少配一次；介意的话可以整段删掉
 
@@ -60,7 +59,7 @@ GLM + Codex + MiMo 三源悬浮小组件 + 番茄工作闹钟，深色状态轨�
 - **番茄钟**: `root.after` 每秒驱动倒计时状态机
 - **通知**: winotify（WinRT toast）+ 注册表注册应用 AUMID，显示番茄图标与应用名
 - **API**: 优先实时读取 ZCode 配置（`~/.zcode/cli/config.json` 当前供应商 + `~/.zcode/v2/config.json` 的 apiKey/baseURL），调用 GLM 配额接口获取用量；详见下方「API 配置来源」
-- **刷新**: 后台线程请求 API，主线程更新 UI，5 分钟轮询
+- **刷新**: 后台线程请求 API，主线程更新 UI；会话活跃时每 5 分钟、空闲时每 10 分钟轮询
 
 ## 安装与运行
 
@@ -80,7 +79,7 @@ python main.py             # 或双击 start.bat（pythonw 无窗口启动）
 
 > **刷新兜底 key**：兜底 `config.json` 里的 key 过期后，重跑 `python setup_config.py` 即可——它会跳过已有 `config.json`，从 ZCode / 环境变量 / `~/.claude/settings.json` 读取最新配置写入（只覆盖 `base_url` / `token`，`mimo` 等手工段原样保留）。
 
-> **MiMo 槽**：v1.45 起**不显示用量**，只做会话活跃指示（呼吸灯）。`config.json` 的 `mimo` 段现在不会被读取，留着只为恢复用量时少配一次；介意可整段删掉。
+> **MiMo 槽已停用（v1.48）**：不显示图标，也不扫描会话。`config.json` 的 `mimo` 段目前不会被读取，保留作历史配置。
 
 **开机自启**：悬浮窗上右键 →「开机自启（点击切换）」，开启后登录 Windows 自动后台启动；对应注册表项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `GlmDashboard`。
 
@@ -93,6 +92,10 @@ C:\Windows\explorer.exe "D:\Git-仓库\glm-plan-dashboard\launch-dashboard.vbs"
 在沙盒里直接 `wscript launch-dashboard.vbs`、`pythonw main.py` 或 `schtasks` 均不可行（前两者被 Job 连坐回收，后者被沙盒拦截）。从 Git Bash 直接调 explorer 传中文路径可能因参数编码丢失而不触发，改用 `powershell Start-Process explorer.exe -ArgumentList "<vbs 路径>"`。进程在跑但看不到悬浮窗时，先检查它是否缩成了屏缘 6px 细条（鼠标触及该侧屏缘即滑出），位置记忆在 `ui_state.json`。
 
 ## 更新日志
+
+### v1.48
+- 默认状态轨改为 GLM、Codex、番茄钟三槽：停用与默认账号使用同一凭证、同一用量接口的 `codex:bili` 槽，以及套餐到期的 MiMo 槽。相关账号目录和代码保留。
+- 周期刷新现在会跳过已停用的 Codex 账号；会话扫描沿用现有停用过滤，不再对这两个槽位触发提醒。
 
 ### v1.47
 - **Kimi 源整体移除**：Kimi Code 套餐已取消、后续不会再用——与 GLM（v1.40 停用保留代码）、MiMo（v1.45 停抓保留代码）的「停用留尸」不同，这次按需求把通道删干净：`fetch_kimi_usage` / `_kimi_server_targets` / `KIMI_*` 常量 / `KIMI_GREEN` / `_draw_kimi_mark`（绿色星芒图标）/ 状态轨与详情卡的 kimi 分支 / tooltip 与读数持久化（`_apply_kimi_usage`、`readings.kimi`）/ 闲忙 watcher（`~/.kimi-code/server/events` 会话信号）全部删除。`_SLOT_KEYS` 回三源，状态轨 glm/codex/mimo/pomo 四槽、`WIDGET_H` 312 → 252（`SLOT_LAYOUT` 单一派生，自动重排）

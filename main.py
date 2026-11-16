@@ -1,8 +1,7 @@
-"""GLM + Codex + MiMo 悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨贴靠屏幕左/右缘
+"""GLM + Codex 悬浮小组件 + 番茄工作闹钟 — Acrylic 竖向状态轨贴靠屏幕左/右缘
 
-Win11 Acrylic 真毛玻璃状态轨：GLM 深蓝晶体、Codex 洋红终端符、MiMo 橙色
-气泡火花、番茄沙漏四个图标槽位的圆环分别表示短期额度、Codex 周预算、
-MiMo 会话活跃（v1.45 起**不显示用量**，只做呼吸灯指示）和当前番茄阶段剩余。
+Win11 Acrylic 真毛玻璃状态轨：GLM 深蓝晶体、Codex 洋红终端符、
+番茄沙漏三个图标槽位的圆环分别表示短期额度、Codex 周预算和当前番茄阶段剩余。
 拖到任意屏松手就近贴边（左/右缘皆可，跨屏生效），悬停从停靠侧对缘展开
 详情面板，空闲时自动缩成停靠侧 6px 水位式番茄进度条（满格齐顶、随剩余
 时间自上而下回落）。
@@ -1462,7 +1461,7 @@ RAIL_RADIUS = WIDGET_W // 2
 # 暂时停用的源：既不进状态轨，也不参与周期刷新与闲忙通知。停用 ≠ 故障摘牌
 # ——摘牌仍会周期探测、成功一次就复活并刷日志；这里是彻底关掉。需要停用某个
 # 源时把它的 key 加进这个元组即可：fetch、图标、详情卡、告警代码全都还在。
-DISABLED_SOURCES = ()
+DISABLED_SOURCES = ("codex:bili", "mimo")
 
 _SLOT_KEYS = (["glm"]
               + ["codex" if not slug else f"codex:{slug}"
@@ -2971,7 +2970,9 @@ class GLMWidget:
             if key not in DISABLED_SOURCES:
                 self._refresh_source(key, schedule=False)
         for slug, home in CODEX_PROFILES:
-            self._refresh_source(self._codex_key(slug), schedule=False)
+            key = self._codex_key(slug)
+            if key not in DISABLED_SOURCES:
+                self._refresh_source(key, schedule=False)
         self._schedule()
 
     def _refresh_source(self, key, schedule=True):
